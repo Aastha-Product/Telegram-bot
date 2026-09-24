@@ -294,9 +294,67 @@ def test_ai_outage_during_redraft_keeps_edit_open(monkeypatch: pytest.MonkeyPatc
 
 def test_start_greets_meera_only() -> None:
     mine, theirs = FakeMessage("/start"), FakeMessage("/start", user_id=STRANGER)
-    asyncio.run(review.handle_start(SimpleNamespace(message=mine), None))
-    asyncio.run(review.handle_start(SimpleNamespace(message=theirs), None))
+    asyncio.run(review.handle_start(SimpleNamespace(message=mine), SimpleNamespace(bot=FakeBot())))
+    asyncio.run(review.handle_start(SimpleNamespace(message=theirs), SimpleNamespace(bot=FakeBot())))
     assert "listening" in mine.replies[0][0] and theirs.replies == []
+
+
+def test_start_delivers_drafts_that_were_waiting_for_it() -> None:
+    d = _pending_draft()  # never delivered: Meera hadn't pressed Start yet
+    bot = FakeBot()
+    asyncio.run(review.handle_start(SimpleNamespace(message=FakeMessage("/start")), SimpleNamespace(bot=bot)))
+    assert [m["text"].split(" · ")[0] for m in bot.sent] == [f"Draft #{d.id}"]
+    assert db.get_undelivered_drafts() == []
+
+
+# --- startup self-check ------------------------------------------------------------------
+
+
+class StartupBot(FakeBot):
+    username = "Meeravoicebot"
+
+    def __init__(self, reachable: bool = True) -> None:
+        super().__init__()
+        self.reachable = reachable
+
+    async def send_chat_action(self, chat_id: int, action: str) -> bool:
+        if not self.reachable:
+            raise BadRequest("PEER_ID_INVALID")
+        return True
+
+
+def test_startup_delivers_waiting_drafts_when_chat_is_reachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    import ingest
+
+    async def none_pending(bot) -> int:
+        return 0
+
+    monkeypatch.setattr(ingest, "transcribe_pending", none_pending)
+    _pending_draft()
+    bot = StartupBot()
+    asyncio.run(app.on_startup(SimpleNamespace(bot=bot)))
+    assert len(bot.sent) == 1
+
+
+def test_startup_warns_when_meera_has_not_pressed_start(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    import ingest
+
+    async def none_pending(bot) -> int:
+        return 0
+
+    monkeypatch.setattr(ingest, "transcribe_pending", none_pending)
+    _pending_draft()
+    bot = StartupBot(reachable=False)
+    asyncio.run(app.on_startup(SimpleNamespace(bot=bot)))
+    assert bot.sent == []
+    assert "review_chat=unreachable" in caplog.text and "press Start" in caplog.text
+
+
+def test_asset_check_passes_and_fails_fast_on_missing_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    app.check_assets()
+    monkeypatch.setattr(app, "REQUIRED_PROMPTS", ("does_not_exist",))
+    with pytest.raises(FileNotFoundError):
+        app.check_assets()
 
 
 # --- app routing ---------------------------------------------------------------------------

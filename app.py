@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from telegram import Update
-from telegram.error import InvalidToken
+from telegram.error import InvalidToken, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -17,11 +17,15 @@ from telegram.ext import (
 
 import config
 import db
+import draft
+import gemini_client
 import ingest
 import pipeline
 import review
 
 log = logging.getLogger(__name__)
+
+REQUIRED_PROMPTS: tuple[str, ...] = ("triage", "draft", "revise", "repair", "transcribe", "voice_skill")
 
 ALLOWED_UPDATES: list[str] = [Update.CHANNEL_POST, Update.MESSAGE, Update.CALLBACK_QUERY]
 # PTB's run_daily numbers days from Sunday = 0.
@@ -64,8 +68,32 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.error("app.unhandled_error update_id=%s", update_id, exc_info=context.error)
 
 
+def check_assets() -> None:
+    """Fail fast if the voice corpus or any prompt is missing: drafting without them is a defect."""
+    pieces = draft.load_corpus()
+    for name in REQUIRED_PROMPTS:
+        if not gemini_client.load_prompt(name).strip():
+            raise ValueError(f"prompt {name!r} is empty")
+    log.info("app.self_check assets=ok corpus_pieces=%d prompts=%d", len(pieces), len(REQUIRED_PROMPTS))
+
+
+async def check_review_chat(application: Application) -> bool:
+    """Warn loudly if drafts can't reach Meera (usually: she hasn't pressed Start yet)."""
+    try:
+        await application.bot.send_chat_action(config.settings.telegram_review_chat_id, "typing")
+    except TelegramError as exc:
+        log.warning("app.self_check review_chat=unreachable error=%s hint='open the bot and press Start'",
+                    type(exc).__name__)
+        return False
+    log.info("app.self_check review_chat=ok")
+    return True
+
+
 async def on_startup(application: Application) -> None:
-    """Pick up voice notes whose transcription failed before the last shutdown."""
+    """getMe already ran in initialize(); check delivery, then pick up work left from before a restart."""
+    log.info("app.self_check bot=@%s", application.bot.username)
+    if await check_review_chat(application):
+        await review.deliver_waiting(application.bot)
     await ingest.transcribe_pending(application.bot)
 
 
@@ -116,6 +144,11 @@ def schedule_drafts(application: Application) -> None:
 def main() -> None:
     """Start the bot in long-polling mode (local dev)."""
     setup_logging()
+    try:
+        check_assets()
+    except Exception:
+        log.critical("app.startup_failed reason=missing_assets", exc_info=True)
+        raise SystemExit(1) from None
     db.init_db()
     log.info("app.starting mode=polling capture_chat=%s db=%s",
              config.settings.telegram_chat_id, config.settings.db_path)

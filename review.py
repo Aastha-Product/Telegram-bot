@@ -264,9 +264,20 @@ async def _redraft(bot: Bot, message: Message, pending: db.Draft, instruction: s
     await send_for_review(bot, new_id)
 
 
+async def deliver_waiting(bot: Bot) -> int:
+    """Send every pending draft that never reached Meera; returns how many got through."""
+    waiting = await asyncio.to_thread(db.get_undelivered_drafts)
+    delivered = 0
+    for d in waiting:
+        delivered += await send_for_review(bot, d.id)
+    return delivered
+
+
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     if message is None or not is_meera(message.from_user):
         return
     await reply_safely(message, "I'm set up and listening. Drafts will arrive in this chat for you to "
-                          "approve, edit or discard. Nothing is ever posted for you.")
+                                "approve, edit or discard. Nothing is ever posted for you.")
+    # Telegram only lets a bot message someone after they press Start, so drafts may be waiting.
+    await deliver_waiting(context.bot)

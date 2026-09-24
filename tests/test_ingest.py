@@ -44,8 +44,13 @@ def _sticker() -> Sticker:
 class FakeBot:
     """Serves voice-note downloads; `fail=True` simulates Telegram being unreachable."""
 
+    username = "testbot"
+
     def __init__(self, audio: bytes = b"OggS-fake-audio", fail: bool = False) -> None:
         self.audio, self.fail, self.requested = audio, fail, []
+
+    async def send_chat_action(self, chat_id: int, action: str) -> bool:
+        return True
 
     async def get_file(self, file_id: str) -> SimpleNamespace:
         self.requested.append(file_id)
