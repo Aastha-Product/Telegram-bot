@@ -33,6 +33,8 @@ DEFAULTS: dict[str, str] = {
     "TIMEZONE": "Asia/Kolkata",
     "TRIAGE_THRESHOLD": "6",
     "TRIAGE_MIN_WORDS": "12",
+    "NEWS_MAX_AGE_DAYS": "14",
+    "NEWS_MAX_ITEMS": "2",
     "DRAFT_MIN_CHARS": "200",
     "DRAFT_MAX_CHARS": "3000",
 }
@@ -60,6 +62,8 @@ class Settings:
     timezone: ZoneInfo
     triage_threshold: float
     triage_min_words: int
+    news_max_age_days: int
+    news_max_items: int
     draft_min_chars: int
     draft_max_chars: int
 
@@ -80,6 +84,7 @@ class Settings:
             f"timezone={self.timezone.key!r}, "
             f"triage_threshold={self.triage_threshold}, "
             f"triage_min_words={self.triage_min_words}, "
+            f"news=[{self.news_max_age_days}d, {self.news_max_items} items], "
             f"draft_chars=[{self.draft_min_chars}, {self.draft_max_chars}])"
         )
 
@@ -163,6 +168,11 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     if min_words < 1:
         errors.append("TRIAGE_MIN_WORDS must be at least 1")
 
+    news_days = _parse_int("NEWS_MAX_AGE_DAYS", get("NEWS_MAX_AGE_DAYS"), errors)
+    news_items = _parse_int("NEWS_MAX_ITEMS", get("NEWS_MAX_ITEMS"), errors)
+    if news_days < 1 or news_items < 1:
+        errors.append("NEWS_MAX_AGE_DAYS and NEWS_MAX_ITEMS must be at least 1")
+
     min_chars = _parse_int("DRAFT_MIN_CHARS", get("DRAFT_MIN_CHARS"), errors)
     max_chars = _parse_int("DRAFT_MAX_CHARS", get("DRAFT_MAX_CHARS"), errors)
     if not 0 < min_chars < max_chars:
@@ -183,6 +193,8 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         timezone=_parse_zone(get("TIMEZONE"), errors),
         triage_threshold=threshold,
         triage_min_words=min_words,
+        news_max_age_days=news_days,
+        news_max_items=news_items,
         draft_min_chars=min_chars,
         draft_max_chars=max_chars,
     )

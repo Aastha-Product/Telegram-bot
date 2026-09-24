@@ -13,7 +13,7 @@ Rules:
 - category must be one of: {categories}
 - reason: one sentence explaining the score.
 - suggested_angle: one sentence describing the post's core argument, using only material in the note.
-- news_keywords: 2 to 5 plain search words for finding a related current news story (for example: cosmetic preservative supplier India). No quotes, no punctuation.
+- news_keywords: 2 to 4 plain search words for finding a related current news story (for example: cosmetic preservative supplier India). No quotes, no punctuation.
 
 Pieces Meera has already published (titles or opening lines):
 {published}

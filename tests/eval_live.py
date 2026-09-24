@@ -2,6 +2,7 @@
 
 Usage:
     python tests/eval_live.py triage      # score the 5 sample notes
+    python tests/eval_live.py news        # real Google News fetch for sample keywords
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config  # noqa: E402
 import db  # noqa: E402
+import news  # noqa: E402
 import triage  # noqa: E402
 
 SAMPLES: dict[str, str] = json.loads(
@@ -44,6 +46,24 @@ async def eval_triage() -> None:
     print("CHECK clean_beauty ranks below batch_14:", clean.score < batch.score)
 
 
+NEWS_QUERIES = [
+    "cosmetic raw material supplier formulation changes",
+    "cosmetic ingredient sourcing India supplier audit",
+    "skin barrier repair ceramide",
+    "skincare cosmetics India regulation",
+    "sunscreen SPF India",
+]
+
+
+async def eval_news() -> None:
+    for query in NEWS_QUERIES:
+        raw = news.parse_items(await news._fetch(news.build_params(query)))
+        kept = await news.fetch_news(query)
+        print(f"[{query}] raw={len(raw)} kept={len(kept)}")
+        for item in kept:
+            print(f"   {item.published:%Y-%m-%d} {item.source}: {item.title[:90]}")
+
+
 if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else "triage"
-    asyncio.run({"triage": eval_triage}[command]())
+    asyncio.run({"triage": eval_triage, "news": eval_news}[command]())

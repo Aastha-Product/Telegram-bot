@@ -28,6 +28,7 @@ def test_loads_required_and_defaults() -> None:
     assert s.triage_threshold == 6.0
     assert s.triage_min_words == 12
     assert (s.draft_min_chars, s.draft_max_chars) == (200, 3000)
+    assert (s.news_max_age_days, s.news_max_items) == (14, 2)
 
 
 def test_overrides_are_applied() -> None:
@@ -71,6 +72,7 @@ def test_capture_chat_id_must_be_channel_id() -> None:
         ("SCHEDULE_TIME", "7.30am"),
         ("TIMEZONE", "Mars/Olympus"),
         ("DRAFT_MIN_CHARS", "5000"),
+        ("NEWS_MAX_ITEMS", "0"),
     ],
 )
 def test_invalid_values_rejected(name: str, value: str) -> None:
