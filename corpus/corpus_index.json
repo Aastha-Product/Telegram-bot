@@ -1,0 +1,107 @@
+{
+  "1": {
+    "source_id": "linkedin_post_001",
+    "format": "linkedin",
+    "category": "Ingredient Deep-Dive",
+    "title": "The niacinamide serum you're using probably has the ingredient listed at 5% or 10% on the ",
+    "path": "piece_01.txt"
+  },
+  "2": {
+    "source_id": "linkedin_post_002",
+    "format": "linkedin",
+    "category": "Founder Story",
+    "title": "In 2021 I was sitting in a stability review meeting at the pharma company I worked for.",
+    "path": "piece_02.txt"
+  },
+  "3": {
+    "source_id": "linkedin_post_003",
+    "format": "linkedin",
+    "category": "India-Specific Context",
+    "title": "In the 12 months to June 2025, 23% of our product returns came from customers who mentione",
+    "path": "piece_03.txt"
+  },
+  "4": {
+    "source_id": "linkedin_post_004",
+    "format": "linkedin",
+    "category": "Industry Transparency",
+    "title": "Last September I was at a trade fair in Mumbai.",
+    "path": "piece_04.txt"
+  },
+  "5": {
+    "source_id": "newsletter_001",
+    "format": "newsletter",
+    "category": "Brand Philosophy",
+    "title": "What you're actually signed up for",
+    "path": "piece_05.txt"
+  },
+  "6": {
+    "source_id": "newsletter_002",
+    "format": "newsletter",
+    "category": "Formulation Science",
+    "title": "What an \"active\" actually does (and why most explanations stop too early)",
+    "path": "piece_06.txt"
+  },
+  "7": {
+    "source_id": "newsletter_003",
+    "format": "newsletter",
+    "category": "Formulation Science",
+    "title": "pH - the question nobody puts on the label",
+    "path": "piece_07.txt"
+  },
+  "8": {
+    "source_id": "newsletter_004",
+    "format": "newsletter",
+    "category": "Ingredient Deep-Dive",
+    "title": "The Vitamin C email (I've been putting this off)",
+    "path": "piece_08.txt"
+  },
+  "9": {
+    "source_id": "newsletter_005",
+    "format": "newsletter",
+    "category": "Brand Philosophy",
+    "title": "Why there's no fragrance in anything we make",
+    "path": "piece_09.txt"
+  },
+  "10": {
+    "source_id": "newsletter_006",
+    "format": "newsletter",
+    "category": "Consumer Education",
+    "title": "The one thing I want you to stop doing with SPF",
+    "path": "piece_10.txt"
+  },
+  "11": {
+    "source_id": "newsletter_007",
+    "format": "newsletter",
+    "category": "Formulation Science",
+    "title": "Ceramides and the barrier - let me explain what we're actually talking about",
+    "path": "piece_11.txt"
+  },
+  "12": {
+    "source_id": "newsletter_008",
+    "format": "newsletter",
+    "category": "Industry Transparency",
+    "title": "\"Natural\" in a formulation lab means something very specific. It's not what the label implies.",
+    "path": "piece_12.txt"
+  },
+  "13": {
+    "source_id": "newsletter_009",
+    "format": "newsletter",
+    "category": "Industry Transparency",
+    "title": "Clean beauty gets some things right. The rest is making things harder.",
+    "path": "piece_13.txt"
+  },
+  "14": {
+    "source_id": "newsletter_010",
+    "format": "newsletter",
+    "category": "Ingredient Deep-Dive",
+    "title": "Peptides: what the research actually says",
+    "path": "piece_14.txt"
+  },
+  "15": {
+    "source_id": "newsletter_011",
+    "format": "newsletter",
+    "category": "Founder Story",
+    "title": "18 months of Skinstinct. Some data, some honesty.",
+    "path": "piece_15.txt"
+  }
+}

@@ -32,6 +32,7 @@ DEFAULTS: dict[str, str] = {
     "SCHEDULE_TIME": "07:30",
     "TIMEZONE": "Asia/Kolkata",
     "TRIAGE_THRESHOLD": "6",
+    "TRIAGE_MIN_WORDS": "12",
     "DRAFT_MIN_CHARS": "200",
     "DRAFT_MAX_CHARS": "3000",
 }
@@ -58,6 +59,7 @@ class Settings:
     schedule_time: time
     timezone: ZoneInfo
     triage_threshold: float
+    triage_min_words: int
     draft_min_chars: int
     draft_max_chars: int
 
@@ -77,6 +79,7 @@ class Settings:
             f"schedule_time={self.schedule_time.strftime('%H:%M')}, "
             f"timezone={self.timezone.key!r}, "
             f"triage_threshold={self.triage_threshold}, "
+            f"triage_min_words={self.triage_min_words}, "
             f"draft_chars=[{self.draft_min_chars}, {self.draft_max_chars}])"
         )
 
@@ -156,6 +159,10 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     if not 0.0 <= threshold <= 10.0:
         errors.append("TRIAGE_THRESHOLD must be between 0 and 10")
 
+    min_words = _parse_int("TRIAGE_MIN_WORDS", get("TRIAGE_MIN_WORDS"), errors)
+    if min_words < 1:
+        errors.append("TRIAGE_MIN_WORDS must be at least 1")
+
     min_chars = _parse_int("DRAFT_MIN_CHARS", get("DRAFT_MIN_CHARS"), errors)
     max_chars = _parse_int("DRAFT_MAX_CHARS", get("DRAFT_MAX_CHARS"), errors)
     if not 0 < min_chars < max_chars:
@@ -175,6 +182,7 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         schedule_time=_parse_time(get("SCHEDULE_TIME"), errors),
         timezone=_parse_zone(get("TIMEZONE"), errors),
         triage_threshold=threshold,
+        triage_min_words=min_words,
         draft_min_chars=min_chars,
         draft_max_chars=max_chars,
     )

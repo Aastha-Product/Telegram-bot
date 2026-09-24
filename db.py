@@ -68,6 +68,15 @@ MIGRATIONS: tuple[str, ...] = (
     PRAGMA user_version = 1;
     COMMIT;
     """,
+    """
+    BEGIN;
+    ALTER TABLE notes ADD COLUMN worth_developing INTEGER;
+    ALTER TABLE notes ADD COLUMN triage_reason TEXT;
+    ALTER TABLE notes ADD COLUMN angle TEXT;
+    ALTER TABLE notes ADD COLUMN news_keywords TEXT;
+    PRAGMA user_version = 2;
+    COMMIT;
+    """,
 )
 
 _db_path: Path | None = None
@@ -85,6 +94,10 @@ class Note:
     status: str
     category: str | None
     score: float | None
+    worth_developing: bool | None = None
+    triage_reason: str | None = None
+    angle: str | None = None
+    news_keywords: str | None = None
 
 
 @dataclass(frozen=True)
@@ -243,6 +256,30 @@ def set_note_transcript(note_id: int, content: str) -> bool:
     return cur.rowcount == 1
 
 
+def set_note_triage(
+    note_id: int,
+    score: float,
+    worth_developing: bool,
+    category: str | None,
+    reason: str,
+    angle: str,
+    news_keywords: str,
+) -> bool:
+    """Persist a triage verdict so a note is never scored twice."""
+    if not 0.0 <= score <= 10.0:
+        raise ValueError("score must be between 0 and 10")
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            UPDATE notes SET score = ?, worth_developing = ?, category = ?,
+                             triage_reason = ?, angle = ?, news_keywords = ?
+            WHERE id = ?
+            """,
+            (score, int(worth_developing), category, reason, angle, news_keywords, note_id),
+        )
+    return cur.rowcount == 1
+
+
 def set_note_status(note_id: int, status: str) -> bool:
     """Return True if the note existed and was updated."""
     _check(status, NOTE_STATUSES, "status")
@@ -263,6 +300,10 @@ def _row_to_note(row: sqlite3.Row) -> Note:
         status=row["status"],
         category=row["category"],
         score=row["score"],
+        worth_developing=None if row["worth_developing"] is None else bool(row["worth_developing"]),
+        triage_reason=row["triage_reason"],
+        angle=row["angle"],
+        news_keywords=row["news_keywords"],
     )
 
 

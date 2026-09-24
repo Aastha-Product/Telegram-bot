@@ -249,3 +249,30 @@ def test_unfinished_run_is_visible() -> None:
     db.start_run("slot")
     run = db.get_run("slot")
     assert run.outcome is None and run.finished_at is None
+
+
+# --- triage fields & migrations --------------------------------------------------
+
+
+def test_set_note_triage_persists_verdict() -> None:
+    note_id = _note()
+    assert db.set_note_triage(note_id, 8.5, True, "Industry Transparency", "concrete", "angle", "kw") is True
+    note = db.get_note(note_id)
+    assert (note.score, note.worth_developing, note.category) == (8.5, True, "Industry Transparency")
+    assert (note.triage_reason, note.angle, note.news_keywords) == ("concrete", "angle", "kw")
+    assert note.status == "new"  # scoring alone never changes status
+    with pytest.raises(ValueError):
+        db.set_note_triage(note_id, 10.5, True, None, "", "", "")
+    assert db.set_note_triage(9999, 5, False, None, "", "", "") is False
+
+
+def test_existing_v1_database_upgrades_without_data_loss(tmp_path: Path) -> None:
+    path = tmp_path / "old.db"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(db.MIGRATIONS[0])
+        conn.execute("INSERT INTO notes (tg_message_id, tg_chat_id, content, created_at) VALUES (1, -100, 'old note', ?)",
+                     (T0.isoformat(),))
+    db.init_db(path)
+    assert db.schema_version() == len(db.MIGRATIONS)
+    [note] = db.get_new_notes()
+    assert note.content == "old note" and note.score is None and note.angle is None

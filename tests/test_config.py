@@ -26,6 +26,7 @@ def test_loads_required_and_defaults() -> None:
     assert s.schedule_time == time(7, 30)
     assert s.timezone.key == "Asia/Kolkata"
     assert s.triage_threshold == 6.0
+    assert s.triage_min_words == 12
     assert (s.draft_min_chars, s.draft_max_chars) == (200, 3000)
 
 
@@ -65,6 +66,7 @@ def test_capture_chat_id_must_be_channel_id() -> None:
         ("MEERA_USER_ID", "not-a-number"),
         ("TRIAGE_THRESHOLD", "11"),
         ("TRIAGE_THRESHOLD", "-1"),
+        ("TRIAGE_MIN_WORDS", "0"),
         ("SCHEDULE_DAYS", "monday"),
         ("SCHEDULE_TIME", "7.30am"),
         ("TIMEZONE", "Mars/Olympus"),
