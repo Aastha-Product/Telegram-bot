@@ -3,6 +3,9 @@
 Usage:
     python tests/eval_live.py triage      # score the 5 sample notes
     python tests/eval_live.py news        # real Google News fetch for sample keywords
+    python tests/eval_live.py draft [--save]  # triage + news + draft for the 5 sample notes;
+                                              # --save stores them as the prompt-regression baseline
+    python tests/eval_live.py probe [n]   # hallucination probe: n drafts of one note, no news
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config  # noqa: E402
 import db  # noqa: E402
+import draft  # noqa: E402
 import news  # noqa: E402
 import triage  # noqa: E402
 
@@ -64,6 +68,52 @@ async def eval_news() -> None:
             print(f"   {item.published:%Y-%m-%d} {item.source}: {item.title[:90]}")
 
 
+BASELINE = Path(__file__).parent / "fixtures" / "last_good_drafts.json"
+
+
+async def eval_draft(save: bool = False) -> None:
+    notes = _load_samples()
+    baseline: dict[str, dict] = {}
+    for key, note in notes.items():
+        verdict = await triage.score_note(note)
+        items = await news.fetch_news(verdict.news_keywords)
+        result = await draft.make_draft(note.content, verdict.category, verdict.angle,
+                                        draft.pick_exemplars(verdict.category), items)
+        print("=" * 100)
+        print(f"{key}: score={verdict.score} category={verdict.category} news_offered={len(items)}")
+        if result is None:
+            print("  -> DROPPED (failed validation twice)")
+            continue
+        words = len(result.body.split())
+        print(f"  words={words} chars={len(result.body)} source={result.source_url}")
+        print("-" * 100)
+        print(result.body)
+        baseline[key] = {"score": verdict.score, "category": verdict.category, "body": result.body}
+    if save:
+        BASELINE.write_text(json.dumps(baseline, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"saved {len(baseline)} drafts to {BASELINE}")
+
+
+async def eval_probe(runs: int) -> None:
+    note = SAMPLES["layering_order"]
+    passed = dropped = 0
+    for n in range(runs):
+        result = await draft.make_draft(note, "Consumer Education", "Layering order, not the serum, is the problem.",
+                                        draft.pick_exemplars("Consumer Education"), [])
+        if result is None:
+            dropped += 1
+        else:
+            passed += 1
+            assert not draft.unsupported_numbers(result.body, note)
+        print(f"run {n + 1}: {'dropped' if result is None else 'passed validation'}")
+    print(f"probe: {passed} passed, {dropped} dropped, 0 invented facts reached output")
+
+
 if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else "triage"
-    asyncio.run({"triage": eval_triage, "news": eval_news}[command]())
+    if command == "probe":
+        asyncio.run(eval_probe(int(sys.argv[2]) if len(sys.argv) > 2 else 5))
+    elif command == "draft":
+        asyncio.run(eval_draft(save="--save" in sys.argv))
+    else:
+        asyncio.run({"triage": eval_triage, "news": eval_news}[command]())
