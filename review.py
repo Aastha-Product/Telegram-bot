@@ -126,7 +126,8 @@ async def send_notice(bot: Bot, text: str) -> None:
         log.error("review.notice_failed error=%s", type(exc).__name__)
 
 
-async def _reply(message: Message | None, text: str, parse_mode: str | None = None) -> None:
+async def reply_safely(message: Message | None, text: str, parse_mode: str | None = None) -> None:
+    """Reply without ever raising; failures are logged."""
     if message is None:
         return
     try:
@@ -177,7 +178,7 @@ async def _approve(query, message: Message | None, draft_id: int) -> None:
     await query.answer("Approved")
     await _remove_buttons(message)
     text, parse_mode = format_approved(d.body)
-    await _reply(message, text, parse_mode)
+    await reply_safely(message, text, parse_mode)
     log.info("review.approved draft_id=%s note_id=%s", d.id, d.note_id)
 
 
@@ -189,7 +190,7 @@ async def _discard(query, message: Message | None, draft_id: int) -> None:
     await asyncio.to_thread(db.set_note_status, d.note_id, "shelved")
     await query.answer("Discarded")
     await _remove_buttons(message)
-    await _reply(message, "Discarded. Nothing was posted, and the note is shelved.")
+    await reply_safely(message, "Discarded. Nothing was posted, and the note is shelved.")
     log.info("review.discarded draft_id=%s note_id=%s", d.id, d.note_id)
 
 
@@ -198,7 +199,7 @@ async def _start_edit(query, message: Message | None, draft_id: int) -> None:
         await query.answer(ALREADY_HANDLED)
         return
     await query.answer("Send your edit")
-    await _reply(message, (
+    await reply_safely(message, (
         f"Editing draft #{draft_id}. Reply here with either:\n"
         f"- your full rewrite (at least {config.settings.draft_min_chars} characters), which I'll keep as-is, or\n"
         "- a short instruction, e.g. 'shorter, open with the supplier call', and I'll redraft once."
@@ -216,7 +217,7 @@ async def handle_review_message(update: Update, context: ContextTypes.DEFAULT_TY
         return
     pending = await asyncio.to_thread(db.get_awaiting_edit)
     if pending is None:
-        await _reply(message, "No draft is waiting for an edit. Tap Edit on a draft first.")
+        await reply_safely(message, "No draft is waiting for an edit. Tap Edit on a draft first.")
         return
 
     text = message.text.strip()
@@ -228,13 +229,13 @@ async def handle_review_message(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def _save_rewrite(bot: Bot, message: Message, pending: db.Draft, text: str) -> None:
     if len(text) > config.settings.draft_max_chars:
-        await _reply(message, f"That's {len(text)} characters; LinkedIn posts here are capped at "
+        await reply_safely(message, f"That's {len(text)} characters; LinkedIn posts here are capped at "
                               f"{config.settings.draft_max_chars}. Please trim it and send it again.")
         return
     # Her own words are kept exactly as written: no normalising, no model call.
     new_id = await asyncio.to_thread(db.add_revision, pending.id, text, MEERA_EDIT_MODEL)
     if new_id is None:
-        await _reply(message, ALREADY_HANDLED)
+        await reply_safely(message, ALREADY_HANDLED)
         return
     log.info("review.rewrite_saved draft_id=%s previous=%s", new_id, pending.id)
     await send_for_review(bot, new_id)
@@ -242,22 +243,22 @@ async def _save_rewrite(bot: Bot, message: Message, pending: db.Draft, text: str
 
 async def _redraft(bot: Bot, message: Message, pending: db.Draft, instruction: str) -> None:
     note = await asyncio.to_thread(db.get_note, pending.note_id)
-    await _reply(message, "Redrafting with your note...")
+    await reply_safely(message, "Redrafting with your note...")
     try:
         body = await draft.revise_draft(note.content, pending.body, instruction)
     except gemini_client.GeminiError as exc:
         log.warning("review.redraft_unavailable draft_id=%s error=%s", pending.id, exc)
-        await _reply(message, "I couldn't reach the AI service, so the draft is unchanged. "
+        await reply_safely(message, "I couldn't reach the AI service, so the draft is unchanged. "
                               "Send the instruction again later, or paste your own rewrite.")
         return
     if body is None:
         await asyncio.to_thread(db.clear_edit, pending.id)
-        await _reply(message, "I couldn't produce a redraft that passes the fact and voice checks, "
+        await reply_safely(message, "I couldn't produce a redraft that passes the fact and voice checks, "
                               "so the original draft is still waiting for you above.")
         return
     new_id = await asyncio.to_thread(db.add_revision, pending.id, body, config.settings.draft_model)
     if new_id is None:
-        await _reply(message, ALREADY_HANDLED)
+        await reply_safely(message, ALREADY_HANDLED)
         return
     log.info("review.redrafted draft_id=%s previous=%s", new_id, pending.id)
     await send_for_review(bot, new_id)
@@ -267,5 +268,5 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     message = update.message
     if message is None or not is_meera(message.from_user):
         return
-    await _reply(message, "I'm set up and listening. Drafts will arrive in this chat for you to "
+    await reply_safely(message, "I'm set up and listening. Drafts will arrive in this chat for you to "
                           "approve, edit or discard. Nothing is ever posted for you.")

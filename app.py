@@ -18,11 +18,14 @@ from telegram.ext import (
 import config
 import db
 import ingest
+import pipeline
 import review
 
 log = logging.getLogger(__name__)
 
 ALLOWED_UPDATES: list[str] = [Update.CHANNEL_POST, Update.MESSAGE, Update.CALLBACK_QUERY]
+# PTB's run_daily numbers days from Sunday = 0.
+PTB_DAYS: dict[str, int] = {"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
 
 
 class RedactSecrets(logging.Filter):
@@ -84,6 +87,7 @@ def build_application() -> Application:
     meera_in_review_chat = filters.Chat(chat_id=settings.telegram_review_chat_id) & filters.User(
         user_id=settings.meera_user_id)
     application.add_handler(CommandHandler("start", review.handle_start, filters=meera_in_review_chat))
+    application.add_handler(CommandHandler("run", pipeline.handle_run_command, filters=meera_in_review_chat))
     application.add_handler(CallbackQueryHandler(review.handle_callback, pattern=review.CALLBACK_RE))
     application.add_handler(
         MessageHandler(
@@ -92,7 +96,21 @@ def build_application() -> Application:
         )
     )
     application.add_error_handler(on_error)
+    schedule_drafts(application)
     return application
+
+
+def schedule_drafts(application: Application) -> None:
+    """Register the Mon/Wed/Fri (by default) draft job in the configured timezone."""
+    settings = config.settings
+    if application.job_queue is None:
+        raise RuntimeError("JobQueue unavailable: install python-telegram-bot[job-queue]")
+    application.job_queue.run_daily(
+        pipeline.scheduled_job,
+        time=settings.schedule_time.replace(tzinfo=settings.timezone),
+        days=tuple(PTB_DAYS[d] for d in settings.schedule_days),
+        name="draft-pipeline",
+    )
 
 
 def main() -> None:

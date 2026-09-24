@@ -501,6 +501,15 @@ def finish_run(run_id: int, outcome: str, detail: str | None = None) -> bool:
     return cur.rowcount == 1
 
 
+def get_last_outcome() -> str | None:
+    """Outcome of the most recent finished run (used to avoid repeating 'nothing ready' notices)."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT outcome FROM runs WHERE finished_at IS NOT NULL ORDER BY finished_at DESC, id DESC LIMIT 1"
+        ).fetchone()
+    return row["outcome"] if row else None
+
+
 def get_run(slot: str) -> Run | None:
     with _connect() as conn:
         row = conn.execute("SELECT * FROM runs WHERE slot = ?", (slot,)).fetchone()
