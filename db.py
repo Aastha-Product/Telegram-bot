@@ -218,6 +218,31 @@ def get_new_notes() -> list[Note]:
     return [_row_to_note(r) for r in rows]
 
 
+def get_pending_transcriptions() -> list[Note]:
+    """Voice notes still waiting for a transcript, oldest first."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM notes WHERE status = 'pending_transcription' ORDER BY created_at, id"
+        ).fetchall()
+    return [_row_to_note(r) for r in rows]
+
+
+def set_note_transcript(note_id: int, content: str) -> bool:
+    """Store a voice note's text and release it to triage; False if it wasn't pending."""
+    content = content.strip()
+    if not content:
+        raise ValueError("transcript must not be empty")
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            UPDATE notes SET content = ?, status = 'new'
+            WHERE id = ? AND status = 'pending_transcription'
+            """,
+            (content, note_id),
+        )
+    return cur.rowcount == 1
+
+
 def set_note_status(note_id: int, status: str) -> bool:
     """Return True if the note existed and was updated."""
     _check(status, NOTE_STATUSES, "status")

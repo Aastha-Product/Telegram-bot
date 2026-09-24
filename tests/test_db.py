@@ -97,6 +97,25 @@ def test_unsupported_post_stored_shelved_without_content() -> None:
     assert db.get_new_notes() == []
 
 
+def test_transcript_releases_pending_voice_note_once() -> None:
+    note_id = _note(content="", content_type="voice", tg_file_id="F", status="pending_transcription")
+    assert [n.id for n in db.get_pending_transcriptions()] == [note_id]
+    assert db.set_note_transcript(note_id, "  spoken idea  ") is True
+    note = db.get_note(note_id)
+    assert (note.content, note.status) == ("spoken idea", "new")
+    assert db.get_pending_transcriptions() == []
+    assert db.set_note_transcript(note_id, "overwrite attempt") is False
+    assert db.get_note(note_id).content == "spoken idea"
+
+
+def test_transcript_cannot_touch_text_notes_or_be_empty() -> None:
+    text_id = _note(message_id=9)
+    assert db.set_note_transcript(text_id, "hijack") is False
+    assert db.get_note(text_id).content == "batch fourteen came back with a pH drift"
+    with pytest.raises(ValueError):
+        db.set_note_transcript(text_id, "   ")
+
+
 def test_invalid_enum_values_rejected() -> None:
     with pytest.raises(ValueError, match="content_type"):
         db.add_note(1, CHAT, "x", T0, content_type="sticker")

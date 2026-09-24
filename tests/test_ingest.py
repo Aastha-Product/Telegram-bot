@@ -2,13 +2,16 @@ import asyncio
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from telegram import Chat, Message, PhotoSize, Sticker, Update, Voice
+from telegram.error import NetworkError
 
 import app
 import config
 import db
+import gemini_client
 import ingest
 
 CAPTURE = config.settings.telegram_chat_id
@@ -38,8 +41,41 @@ def _sticker() -> Sticker:
                    is_animated=False, is_video=False, type=Sticker.REGULAR)
 
 
-def _handle(update: Update) -> None:
-    asyncio.run(ingest.handle_channel_post(update, None))
+class FakeBot:
+    """Serves voice-note downloads; `fail=True` simulates Telegram being unreachable."""
+
+    def __init__(self, audio: bytes = b"OggS-fake-audio", fail: bool = False) -> None:
+        self.audio, self.fail, self.requested = audio, fail, []
+
+    async def get_file(self, file_id: str) -> SimpleNamespace:
+        self.requested.append(file_id)
+        if self.fail:
+            raise NetworkError("telegram unreachable")
+
+        async def download_as_bytearray() -> bytearray:
+            return bytearray(self.audio)
+
+        return SimpleNamespace(download_as_bytearray=download_as_bytearray)
+
+
+@pytest.fixture
+def transcriber(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Replace Gemini transcription; append a string (transcript) or exception per call."""
+    script: list = []
+
+    async def fake_transcribe(audio: bytes, mime_type: str, model: str) -> str:
+        assert (mime_type, model) == ("audio/ogg", config.settings.transcribe_model)
+        item = script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr(gemini_client, "transcribe_audio", fake_transcribe)
+    return script
+
+
+def _handle(update: Update, bot: FakeBot | None = None) -> None:
+    asyncio.run(ingest.handle_channel_post(update, SimpleNamespace(bot=bot or FakeBot(fail=True))))
 
 
 def _all_notes() -> list[db.Note]:
@@ -105,11 +141,55 @@ def test_non_channel_updates_are_rejected() -> None:
     assert _all_notes() == []
 
 
-def test_voice_post_stored_pending_transcription() -> None:
-    _handle(Update(update_id=1, channel_post=_post(voice=_voice())))
+def test_voice_post_transcribed_and_released_to_triage(transcriber: list) -> None:
+    transcriber.append("batch fourteen came back and the pH had drifted")
+    bot = FakeBot()
+    _handle(Update(update_id=1, channel_post=_post(voice=_voice())), bot)
+    assert bot.requested == ["AwACAgUAAxkBVOICE"]
+    [note] = db.get_new_notes()
+    assert (note.content_type, note.status) == ("voice", "new")
+    assert note.content == "batch fourteen came back and the pH had drifted"
+
+
+def test_voice_caption_kept_with_transcript(transcriber: list) -> None:
+    transcriber.append("the transcript")
+    _handle(Update(update_id=1, channel_post=_post(voice=_voice(), caption="re: batch 14")), FakeBot())
+    assert db.get_new_notes()[0].content == "re: batch 14\n\nthe transcript"
+
+
+def test_voice_stays_pending_when_gemini_fails(transcriber: list, caplog) -> None:
+    transcriber.append(gemini_client.GeminiError("model call failed: ServerError 503 UNAVAILABLE"))
+    _handle(Update(update_id=1, channel_post=_post(voice=_voice())), FakeBot())
     [note] = _all_notes()
     assert (note.content_type, note.status, note.tg_file_id) == ("voice", "pending_transcription", "AwACAgUAAxkBVOICE")
     assert db.get_new_notes() == []
+    assert "ingest.transcribe_failed" in caplog.text
+
+
+def test_voice_stays_pending_when_download_fails(transcriber: list) -> None:
+    _handle(Update(update_id=1, channel_post=_post(voice=_voice())), FakeBot(fail=True))
+    assert _all_notes()[0].status == "pending_transcription"
+    assert transcriber == []  # model never called without audio
+
+
+def test_transcribe_pending_retries_failed_voice_notes(transcriber: list) -> None:
+    transcriber.append(gemini_client.GeminiError("down"))
+    _handle(Update(update_id=1, channel_post=_post(message_id=1, voice=_voice())), FakeBot())
+    _handle(Update(update_id=2, channel_post=_post(message_id=2, voice=_voice())), FakeBot(fail=True))
+    assert len(db.get_pending_transcriptions()) == 2
+
+    transcriber.extend(["first transcript", gemini_client.GeminiError("down again")])
+    assert asyncio.run(ingest.transcribe_pending(FakeBot())) == 1
+    assert [n.content for n in db.get_new_notes()] == ["first transcript"]
+    assert len(db.get_pending_transcriptions()) == 1
+
+
+def test_duplicate_voice_post_is_not_transcribed_twice(transcriber: list) -> None:
+    transcriber.append("once")
+    update = Update(update_id=1, channel_post=_post(voice=_voice()))
+    _handle(update, FakeBot())
+    _handle(update, FakeBot())  # would pop from an empty script if it re-transcribed
+    assert len(_all_notes()) == 1
 
 
 def test_sticker_stored_unsupported_and_never_triaged() -> None:
@@ -147,6 +227,13 @@ def test_logs_do_not_contain_note_text(caplog: pytest.LogCaptureFixture) -> None
 def _handler():
     [handler] = app.build_application().handlers[0]
     return handler
+
+
+def test_app_retries_pending_transcriptions_on_startup(transcriber: list) -> None:
+    db.add_note(1, CAPTURE, "", WHEN, "voice", "file-1", "pending_transcription")
+    transcriber.append("recovered after restart")
+    asyncio.run(app.on_startup(SimpleNamespace(bot=FakeBot())))
+    assert db.get_new_notes()[0].content == "recovered after restart"
 
 
 def test_app_routes_only_capture_channel_posts() -> None:

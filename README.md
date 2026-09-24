@@ -33,3 +33,10 @@ Run tests:
 ```
 
 Post in the capture channel; each post becomes a row in `notes` (text → `new`, voice → `pending_transcription`, stickers/bare photos → `unsupported`/`shelved`). Stop with Ctrl+C.
+
+## Gemini smoke test (real API call, not part of pytest)
+
+```bash
+.venv/Scripts/python smoke_gemini.py            # JSON call only
+.venv/Scripts/python smoke_gemini.py note.ogg   # also transcribe an audio file
+```

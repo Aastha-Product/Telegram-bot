@@ -53,8 +53,18 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.error("app.unhandled_error update_id=%s", update_id, exc_info=context.error)
 
 
+async def on_startup(application: Application) -> None:
+    """Pick up voice notes whose transcription failed before the last shutdown."""
+    await ingest.transcribe_pending(application.bot)
+
+
 def build_application() -> Application:
-    application = Application.builder().token(config.settings.telegram_bot_token).build()
+    application = (
+        Application.builder()
+        .token(config.settings.telegram_bot_token)
+        .post_init(on_startup)
+        .build()
+    )
     application.add_handler(
         MessageHandler(
             filters.UpdateType.CHANNEL_POST & filters.Chat(chat_id=config.settings.telegram_chat_id),
