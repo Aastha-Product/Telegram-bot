@@ -25,3 +25,11 @@ Run tests:
 ```bash
 .venv/Scripts/python -m pytest
 ```
+
+## Run the bot locally (long-polling)
+
+```bash
+.venv/Scripts/python app.py
+```
+
+Post in the capture channel; each post becomes a row in `notes` (text → `new`, voice → `pending_transcription`, stickers/bare photos → `unsupported`/`shelved`). Stop with Ctrl+C.

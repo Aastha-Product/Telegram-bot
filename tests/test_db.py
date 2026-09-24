@@ -91,6 +91,12 @@ def test_voice_note_pending_transcription_may_be_empty() -> None:
     assert db.get_new_notes() == []  # not ready for triage until transcribed
 
 
+def test_unsupported_post_stored_shelved_without_content() -> None:
+    note = db.get_note(_note(content="", content_type="unsupported", status="shelved"))
+    assert (note.content_type, note.status, note.content) == ("unsupported", "shelved", "")
+    assert db.get_new_notes() == []
+
+
 def test_invalid_enum_values_rejected() -> None:
     with pytest.raises(ValueError, match="content_type"):
         db.add_note(1, CHAT, "x", T0, content_type="sticker")

@@ -185,7 +185,8 @@ def add_note(
     _check(content_type, NOTE_CONTENT_TYPES, "content_type")
     _check(status, NOTE_STATUSES, "status")
     content = content.strip()
-    if not content and status != "pending_transcription":
+    # Only triage-ready notes need text; pending voice notes and shelved unsupported posts may be empty.
+    if not content and status == "new":
         raise ValueError("note content must not be empty")
     with _connect() as conn:
         row = conn.execute(
