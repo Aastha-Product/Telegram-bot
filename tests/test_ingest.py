@@ -225,8 +225,7 @@ def test_logs_do_not_contain_note_text(caplog: pytest.LogCaptureFixture) -> None
 
 
 def _handler():
-    [handler] = app.build_application().handlers[0]
-    return handler
+    return next(h for h in app.build_application().handlers[0] if h.callback is ingest.handle_channel_post)
 
 
 def test_app_retries_pending_transcriptions_on_startup(transcriber: list) -> None:
@@ -245,8 +244,8 @@ def test_app_routes_only_capture_channel_posts() -> None:
     assert not handler.check_update(Update(update_id=4, message=private))
 
 
-def test_polling_asks_only_for_channel_posts() -> None:
-    assert app.ALLOWED_UPDATES == ["channel_post"]
+def test_polling_asks_only_for_needed_update_types() -> None:
+    assert sorted(app.ALLOWED_UPDATES) == ["callback_query", "channel_post", "message"]
 
 
 def test_redact_filter_scrubs_message_args_and_traceback() -> None:

@@ -77,6 +77,13 @@ MIGRATIONS: tuple[str, ...] = (
     PRAGMA user_version = 2;
     COMMIT;
     """,
+    """
+    BEGIN;
+    ALTER TABLE drafts ADD COLUMN review_message_id INTEGER;
+    ALTER TABLE drafts ADD COLUMN awaiting_edit_at TIMESTAMP;
+    PRAGMA user_version = 3;
+    COMMIT;
+    """,
 )
 
 _db_path: Path | None = None
@@ -112,6 +119,8 @@ class Draft:
     status: str
     created_at: datetime
     reviewed_at: datetime | None
+    review_message_id: int | None = None
+    awaiting_edit: bool = False
 
 
 @dataclass(frozen=True)
@@ -353,7 +362,7 @@ def set_draft_status(draft_id: int, status: str) -> bool:
     with _connect() as conn:
         cur = conn.execute(
             """
-            UPDATE drafts SET status = ?, reviewed_at = ?
+            UPDATE drafts SET status = ?, reviewed_at = ?, awaiting_edit_at = NULL
             WHERE id = ? AND status = 'pending_review'
             """,
             (status, _now(), draft_id),
@@ -373,7 +382,87 @@ def _row_to_draft(row: sqlite3.Row) -> Draft:
         status=row["status"],
         created_at=_from_iso(row["created_at"]),
         reviewed_at=_from_iso(row["reviewed_at"]),
+        review_message_id=row["review_message_id"],
+        awaiting_edit=row["awaiting_edit_at"] is not None,
     )
+
+
+def set_review_message(draft_id: int, message_id: int) -> bool:
+    """Record that a draft reached the review chat (so it isn't delivered twice)."""
+    with _connect() as conn:
+        cur = conn.execute("UPDATE drafts SET review_message_id = ? WHERE id = ?", (message_id, draft_id))
+    return cur.rowcount == 1
+
+
+def get_undelivered_drafts() -> list[Draft]:
+    """Pending drafts whose review message never got through (Telegram was down), oldest first."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM drafts WHERE status = 'pending_review' AND review_message_id IS NULL
+            ORDER BY created_at, id
+            """
+        ).fetchall()
+    return [_row_to_draft(r) for r in rows]
+
+
+def start_edit(draft_id: int) -> bool:
+    """Mark one pending draft as waiting for Meera's edit; any other waiting draft is released."""
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE drafts SET awaiting_edit_at = ? WHERE id = ? AND status = 'pending_review'",
+            (_now(), draft_id),
+        )
+        if cur.rowcount != 1:
+            return False
+        conn.execute("UPDATE drafts SET awaiting_edit_at = NULL WHERE id != ?", (draft_id,))
+    return True
+
+
+def get_awaiting_edit() -> Draft | None:
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM drafts WHERE status = 'pending_review' AND awaiting_edit_at IS NOT NULL
+            ORDER BY awaiting_edit_at DESC LIMIT 1
+            """
+        ).fetchone()
+    return _row_to_draft(row) if row else None
+
+
+def clear_edit(draft_id: int) -> None:
+    with _connect() as conn:
+        conn.execute("UPDATE drafts SET awaiting_edit_at = NULL WHERE id = ?", (draft_id,))
+
+
+def add_revision(previous_id: int, body: str, model: str) -> int | None:
+    """Supersede a pending draft with a new revision in one transaction; None if it wasn't pending.
+
+    Doing both in one transaction guarantees a note never has two drafts pending review.
+    """
+    if not body.strip():
+        raise ValueError("draft body must not be empty")
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            UPDATE drafts SET status = 'superseded', reviewed_at = ?, awaiting_edit_at = NULL
+            WHERE id = ? AND status = 'pending_review'
+            """,
+            (_now(), previous_id),
+        )
+        if cur.rowcount != 1:
+            return None
+        row = conn.execute(
+            """
+            INSERT INTO drafts (note_id, revision, body, model, exemplar_ids, source_url, created_at)
+            SELECT note_id, (SELECT MAX(revision) + 1 FROM drafts d2 WHERE d2.note_id = d.note_id),
+                   ?, ?, exemplar_ids, source_url, ?
+            FROM drafts d WHERE id = ?
+            RETURNING id
+            """,
+            (body, model, _now(), previous_id),
+        ).fetchone()
+    return row["id"]
 
 
 # --- runs ----------------------------------------------------------------------

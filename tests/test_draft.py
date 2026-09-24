@@ -243,3 +243,34 @@ def test_voice_skill_forbids_invented_scenes_and_copying() -> None:
     skill = gemini_client.load_prompt("voice_skill")
     assert "The scene must come from the note" in skill
     assert "Copy sentences or signature lines" in skill
+
+
+# --- revise_draft (Meera's one-line instruction) --------------------------------------
+
+
+def _revise(instruction: str = "shorter, open with the pH") -> str | None:
+    return asyncio.run(draft.revise_draft(NOTE, GOOD_BODY, instruction))
+
+
+def test_revise_returns_validated_body_and_includes_instruction(model: dict) -> None:
+    model["replies"].append(_reply(GOOD_BODY.replace("That sounds small.", "It sounds small.")))
+    assert "It sounds small." in _revise()
+    prompt = model["prompts"][0]
+    assert "<<<INSTRUCTION\nshorter, open with the pH\nINSTRUCTION>>>" in prompt
+    assert GOOD_BODY in prompt and NOTE in prompt
+
+
+def test_revise_allows_facts_from_previous_draft_but_not_new_ones(model: dict) -> None:
+    previous_only = GOOD_BODY  # "Batch 14", "0.4", "three months" all trace to note/previous draft
+    model["replies"].append(_reply(previous_only))
+    assert _revise() == previous_only
+    invented = GOOD_BODY.replace("That sounds small.", "Returns rose 40% after this. That sounds small.")
+    model["replies"] += [_reply(invented), _reply(invented)]
+    assert _revise("add a statistic") is None
+    assert "40" in model["prompts"][-1]  # the redraft was told exactly what to remove
+
+
+def test_revise_propagates_gemini_outage(model: dict) -> None:
+    model["replies"].append(gemini_client.GeminiError("down"))
+    with pytest.raises(gemini_client.GeminiError):
+        _revise()

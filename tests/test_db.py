@@ -276,3 +276,51 @@ def test_existing_v1_database_upgrades_without_data_loss(tmp_path: Path) -> None
     assert db.schema_version() == len(db.MIGRATIONS)
     [note] = db.get_new_notes()
     assert note.content == "old note" and note.score is None and note.angle is None
+
+
+# --- review state --------------------------------------------------------------------
+
+
+def test_review_delivery_tracking() -> None:
+    draft_id = db.add_draft(_note(), "body", "m")
+    assert [d.id for d in db.get_undelivered_drafts()] == [draft_id]
+    assert db.set_review_message(draft_id, 555) is True
+    assert db.get_draft(draft_id).review_message_id == 555
+    assert db.get_undelivered_drafts() == []
+
+
+def test_only_one_draft_awaits_an_edit() -> None:
+    a = db.add_draft(_note(message_id=1), "a", "m")
+    b = db.add_draft(_note(message_id=2), "b", "m")
+    assert db.start_edit(a) and db.get_awaiting_edit().id == a
+    assert db.start_edit(b) and db.get_awaiting_edit().id == b
+    assert not db.get_draft(a).awaiting_edit
+    db.clear_edit(b)
+    assert db.get_awaiting_edit() is None
+
+
+def test_cannot_edit_a_handled_draft() -> None:
+    draft_id = db.add_draft(_note(), "a", "m")
+    db.set_draft_status(draft_id, "approved")
+    assert db.start_edit(draft_id) is False
+
+
+def test_approving_clears_a_pending_edit() -> None:
+    draft_id = db.add_draft(_note(), "a", "m")
+    db.start_edit(draft_id)
+    db.set_draft_status(draft_id, "approved")
+    assert db.get_awaiting_edit() is None
+
+
+def test_add_revision_supersedes_atomically() -> None:
+    note_id = _note()
+    first = db.add_draft(note_id, "first", "gemini", [3, 9], "https://news.google.com/x")
+    db.start_edit(first)
+    second = db.add_revision(first, "second", "meera-edit")
+    old, new = db.get_draft(first), db.get_draft(second)
+    assert (old.status, old.awaiting_edit) == ("superseded", False)
+    assert (new.revision, new.status, new.body, new.model) == (2, "pending_review", "second", "meera-edit")
+    assert (new.exemplar_ids, new.source_url) == ([3, 9], "https://news.google.com/x")
+    assert db.add_revision(first, "third", "m") is None  # old draft is no longer pending
+    pending = [d for d in (db.get_draft(i) for i in (first, second)) if d.status == "pending_review"]
+    assert len(pending) == 1

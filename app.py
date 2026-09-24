@@ -6,15 +6,23 @@ import logging
 
 from telegram import Update
 from telegram.error import InvalidToken
-from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 import config
 import db
 import ingest
+import review
 
 log = logging.getLogger(__name__)
 
-ALLOWED_UPDATES: list[str] = [Update.CHANNEL_POST]
+ALLOWED_UPDATES: list[str] = [Update.CHANNEL_POST, Update.MESSAGE, Update.CALLBACK_QUERY]
 
 
 class RedactSecrets(logging.Filter):
@@ -65,10 +73,22 @@ def build_application() -> Application:
         .post_init(on_startup)
         .build()
     )
+    settings = config.settings
     application.add_handler(
         MessageHandler(
-            filters.UpdateType.CHANNEL_POST & filters.Chat(chat_id=config.settings.telegram_chat_id),
+            filters.UpdateType.CHANNEL_POST & filters.Chat(chat_id=settings.telegram_chat_id),
             ingest.handle_channel_post,
+        )
+    )
+    # Filters narrow what reaches the handlers; each handler re-checks Meera's id in code.
+    meera_in_review_chat = filters.Chat(chat_id=settings.telegram_review_chat_id) & filters.User(
+        user_id=settings.meera_user_id)
+    application.add_handler(CommandHandler("start", review.handle_start, filters=meera_in_review_chat))
+    application.add_handler(CallbackQueryHandler(review.handle_callback, pattern=review.CALLBACK_RE))
+    application.add_handler(
+        MessageHandler(
+            filters.UpdateType.MESSAGE & filters.TEXT & ~filters.COMMAND & meera_in_review_chat,
+            review.handle_review_message,
         )
     )
     application.add_error_handler(on_error)

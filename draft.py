@@ -289,12 +289,36 @@ def _feedback(problems: list[str]) -> str:
     return f"\n# Your previous draft was rejected\nFix every one of these problems:\n{listed}\n"
 
 
-async def _attempt(prompt: str, note_text: str, news: list[NewsItem]) -> tuple[str, str, list[str]]:
+async def _attempt(prompt: str, source_text: str, news: list[NewsItem]) -> tuple[str, str, list[str]]:
     data = await gemini_client.generate_json(prompt, draft_schema(), config.settings.draft_model)
     body = normalise(str(data.get("body", "")))
     used = str(data.get("used_source_url") or "").strip()
     self_check = data.get("self_check") if isinstance(data.get("self_check"), dict) else {}
-    return body, used, validate(body, used, self_check, note_text, news)
+    return body, used, validate(body, used, self_check, source_text, news)
+
+
+async def revise_draft(note_text: str, previous_body: str, instruction: str) -> str | None:
+    """Redraft once from Meera's one-line instruction, under the same validators; None if it fails.
+
+    Facts may come from the note or the previous draft (which already passed validation).
+    Raises GeminiError if the model is unreachable.
+    """
+    def prompt(feedback: str = "") -> str:
+        return gemini_client.render(
+            gemini_client.load_prompt("revise"),
+            voice_skill=gemini_client.load_prompt("voice_skill"),
+            instruction=instruction, previous=previous_body, note=note_text, feedback=feedback,
+        )
+
+    sources = note_text + "\n" + previous_body
+    body, _, problems = await _attempt(prompt(), sources, [])
+    if problems:
+        log.warning("draft.revision_rejected attempt=1 problems=%s", problems)
+        body, _, problems = await _attempt(prompt(_feedback(problems)), sources, [])
+    if problems:
+        log.warning("draft.revision_rejected attempt=2 problems=%s action=drop", problems)
+        return None
+    return body
 
 
 async def make_draft(note_text: str, category: str | None, angle: str, exemplars: list[CorpusPiece],
