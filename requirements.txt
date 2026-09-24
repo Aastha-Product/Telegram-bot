@@ -1,0 +1,5 @@
+python-telegram-bot[job-queue,webhooks]==22.8
+google-genai==2.25.0
+python-dotenv==1.2.3
+feedparser==6.0.14
+pytest==9.1.1
