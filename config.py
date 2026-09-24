@@ -7,6 +7,7 @@ so the service never runs half-configured.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import time
@@ -37,7 +38,11 @@ DEFAULTS: dict[str, str] = {
     "NEWS_MAX_ITEMS": "2",
     "DRAFT_MIN_CHARS": "200",
     "DRAFT_MAX_CHARS": "3000",
+    "PORT": "8080",
 }
+
+# Telegram's secret_token allows 1-256 of these characters; we also require some length.
+WEBHOOK_SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{16,256}$")
 
 VALID_DAYS: tuple[str, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
@@ -66,6 +71,13 @@ class Settings:
     news_max_items: int
     draft_min_chars: int
     draft_max_chars: int
+    public_url: str | None = None
+    webhook_secret: str | None = None
+    port: int = 8080
+
+    @property
+    def webhook_mode(self) -> bool:
+        return self.public_url is not None
 
     def __repr__(self) -> str:
         return (
@@ -85,7 +97,10 @@ class Settings:
             f"triage_threshold={self.triage_threshold}, "
             f"triage_min_words={self.triage_min_words}, "
             f"news=[{self.news_max_age_days}d, {self.news_max_items} items], "
-            f"draft_chars=[{self.draft_min_chars}, {self.draft_max_chars}])"
+            f"draft_chars=[{self.draft_min_chars}, {self.draft_max_chars}], "
+            f"public_url={self.public_url!r}, "
+            f"webhook_secret={_mask(self.webhook_secret or '')}, "
+            f"port={self.port})"
         )
 
     __str__ = __repr__
@@ -178,6 +193,17 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     if not 0 < min_chars < max_chars:
         errors.append("DRAFT_MIN_CHARS must be positive and less than DRAFT_MAX_CHARS")
 
+    public_url = env.get("PUBLIC_URL", "").strip().rstrip("/") or None
+    webhook_secret = env.get("WEBHOOK_SECRET", "").strip() or None
+    if public_url is not None:
+        if not public_url.startswith("https://"):
+            errors.append("PUBLIC_URL must start with https:// (Telegram webhooks require HTTPS)")
+        if webhook_secret is None or not WEBHOOK_SECRET_RE.match(webhook_secret):
+            errors.append("WEBHOOK_SECRET is required with PUBLIC_URL: 16-256 characters of A-Z, a-z, 0-9, _ or -")
+    port = _parse_int("PORT", get("PORT"), errors)
+    if not 0 < port < 65536:
+        errors.append("PORT must be between 1 and 65535")
+
     settings = Settings(
         telegram_bot_token=env["TELEGRAM_BOT_TOKEN"].strip(),
         telegram_chat_id=capture_id,
@@ -197,6 +223,9 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         news_max_items=news_items,
         draft_min_chars=min_chars,
         draft_max_chars=max_chars,
+        public_url=public_url,
+        webhook_secret=webhook_secret,
+        port=port,
     )
     if errors:
         raise ConfigError("Invalid configuration: " + "; ".join(errors))

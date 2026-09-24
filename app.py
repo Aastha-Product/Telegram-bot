@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import hmac
+import json
 import logging
+import signal
+
+import tornado.httpserver
+import tornado.web
 
 from telegram import Update
 from telegram.error import InvalidToken, TelegramError
@@ -24,6 +31,9 @@ import pipeline
 import review
 
 log = logging.getLogger(__name__)
+
+WEBHOOK_SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
+MAX_WEBHOOK_BODY_BYTES = 1_000_000
 
 REQUIRED_PROMPTS: tuple[str, ...] = ("triage", "draft", "revise", "repair", "transcribe", "voice_skill")
 
@@ -56,10 +66,14 @@ class RedactSecrets(logging.Filter):
 def setup_logging() -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
-    handler.addFilter(RedactSecrets([config.settings.telegram_bot_token, config.settings.gemini_api_key]))
+    settings = config.settings
+    # The webhook secret is part of the URL path, which tornado's access log would otherwise print.
+    handler.addFilter(RedactSecrets([settings.telegram_bot_token, settings.gemini_api_key,
+                                     settings.webhook_secret or ""]))
     logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
     # httpx logs every request URL at INFO, and Telegram URLs contain the bot token.
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("tornado.access").setLevel(logging.WARNING)
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -141,8 +155,75 @@ def schedule_drafts(application: Application) -> None:
     )
 
 
+def parse_webhook(secret_header: str | None, body: bytes, bot: object) -> tuple[int, Update | None]:
+    """HTTP status plus the update for one webhook request. Only Telegram knows the secret token."""
+    expected = config.settings.webhook_secret or ""
+    supplied = secret_header or ""
+    if not expected or not hmac.compare_digest(supplied.encode(), expected.encode()):
+        return 403, None
+    try:
+        data = json.loads(body)
+        if not isinstance(data, dict):
+            raise ValueError("update must be a JSON object")
+        return 200, Update.de_json(data, bot)
+    except Exception:  # any malformed payload is a 400, never a crashed handler
+        return 400, None
+
+
+def make_web_app(application: Application) -> tornado.web.Application:
+    """Two routes only: the secret webhook path and a health check."""
+
+    class TelegramWebhook(tornado.web.RequestHandler):
+        async def post(self) -> None:
+            status, update = parse_webhook(self.request.headers.get(WEBHOOK_SECRET_HEADER),
+                                           self.request.body, application.bot)
+            if update is None:
+                log.warning("app.webhook_rejected status=%s", status)
+            else:
+                await application.update_queue.put(update)
+            self.set_status(status)
+
+    class Health(tornado.web.RequestHandler):
+        def get(self) -> None:
+            self.write("ok")
+
+    return tornado.web.Application([
+        (f"/telegram/{config.settings.webhook_secret}", TelegramWebhook),
+        (r"/healthz", Health),
+    ])
+
+
+async def run_webhook(application: Application) -> None:
+    """Production mode: register the webhook with Telegram and serve it until SIGTERM/SIGINT."""
+    settings = config.settings
+    server = tornado.httpserver.HTTPServer(make_web_app(application), max_body_size=MAX_WEBHOOK_BODY_BYTES)
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except (NotImplementedError, RuntimeError):
+            pass  # Windows has no loop signal handlers; Ctrl+C still raises KeyboardInterrupt there.
+    async with application:
+        await application.bot.set_webhook(
+            url=f"{settings.public_url}/telegram/{settings.webhook_secret}",
+            secret_token=settings.webhook_secret,
+            allowed_updates=ALLOWED_UPDATES,
+        )
+        await application.start()
+        server.listen(settings.port, address="0.0.0.0")
+        log.info("app.webhook_listening port=%s", settings.port)
+        # post_init only runs under PTB's own runners, so the startup checks are called here.
+        await on_startup(application)
+        try:
+            await stop.wait()
+        finally:
+            server.stop()
+            await application.stop()
+
+
 def main() -> None:
-    """Start the bot in long-polling mode (local dev)."""
+    """Start the bot: webhook when PUBLIC_URL is set (production), long-polling otherwise (local)."""
     setup_logging()
     try:
         check_assets()
@@ -150,11 +231,15 @@ def main() -> None:
         log.critical("app.startup_failed reason=missing_assets", exc_info=True)
         raise SystemExit(1) from None
     db.init_db()
-    log.info("app.starting mode=polling capture_chat=%s db=%s",
+    mode = "webhook" if config.settings.webhook_mode else "polling"
+    log.info("app.starting mode=%s capture_chat=%s db=%s", mode,
              config.settings.telegram_chat_id, config.settings.db_path)
     try:
-        # Pending updates are Meera's notes, so they are never dropped on startup.
-        build_application().run_polling(allowed_updates=ALLOWED_UPDATES, bootstrap_retries=3)
+        if config.settings.webhook_mode:
+            asyncio.run(run_webhook(build_application()))
+        else:
+            # Pending updates are Meera's notes, so they are never dropped on startup.
+            build_application().run_polling(allowed_updates=ALLOWED_UPDATES, bootstrap_retries=3)
     except InvalidToken:
         # PTB puts the token in this exception's text, so it is never printed.
         log.critical("app.startup_failed reason=invalid_bot_token hint='check TELEGRAM_BOT_TOKEN'")

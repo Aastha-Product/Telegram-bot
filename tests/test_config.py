@@ -95,5 +95,24 @@ def test_error_messages_never_contain_secret_values() -> None:
     assert "SECRET" not in str(exc.value)
 
 
+def test_polling_mode_by_default() -> None:
+    s = load_settings(VALID_ENV)
+    assert not s.webhook_mode and s.public_url is None and s.port == 8080
+
+
+def test_webhook_mode_requires_https_and_strong_secret() -> None:
+    secret = "a" * 32
+    s = load_settings({**VALID_ENV, "PUBLIC_URL": "https://bot.example.com/", "WEBHOOK_SECRET": secret, "PORT": "9000"})
+    assert s.webhook_mode and s.public_url == "https://bot.example.com" and s.port == 9000
+    assert secret not in repr(s)
+    with pytest.raises(ConfigError, match="https"):
+        load_settings({**VALID_ENV, "PUBLIC_URL": "http://bot.example.com", "WEBHOOK_SECRET": secret})
+    for bad in ("", "short", "has spaces in it!!", "x" * 300):
+        with pytest.raises(ConfigError, match="WEBHOOK_SECRET"):
+            load_settings({**VALID_ENV, "PUBLIC_URL": "https://bot.example.com", "WEBHOOK_SECRET": bad})
+    with pytest.raises(ConfigError, match="PORT"):
+        load_settings({**VALID_ENV, "PORT": "70000"})
+
+
 def test_threshold_uses_zero_to_ten_scale() -> None:
     assert load_settings({**VALID_ENV, "TRIAGE_THRESHOLD": "7.5"}).triage_threshold == 7.5
