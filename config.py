@@ -26,11 +26,12 @@ REQUIRED_VARS: tuple[str, ...] = (
 DEFAULTS: dict[str, str] = {
     "TRIAGE_MODEL": "gemini-3.5-flash-lite",
     "DRAFT_MODEL": "gemini-3.5-flash",
+    "TRANSCRIBE_MODEL": "gemini-3.5-flash",
     "DB_PATH": "skinstinct.db",
     "SCHEDULE_DAYS": "mon,wed,fri",
     "SCHEDULE_TIME": "07:30",
     "TIMEZONE": "Asia/Kolkata",
-    "TRIAGE_THRESHOLD": "0.6",
+    "TRIAGE_THRESHOLD": "6",
     "DRAFT_MIN_CHARS": "200",
     "DRAFT_MAX_CHARS": "3000",
 }
@@ -51,6 +52,7 @@ class Settings:
     gemini_api_key: str
     triage_model: str
     draft_model: str
+    transcribe_model: str
     db_path: Path
     schedule_days: tuple[str, ...]
     schedule_time: time
@@ -69,6 +71,7 @@ class Settings:
             f"gemini_api_key={_mask(self.gemini_api_key)}, "
             f"triage_model={self.triage_model!r}, "
             f"draft_model={self.draft_model!r}, "
+            f"transcribe_model={self.transcribe_model!r}, "
             f"db_path={str(self.db_path)!r}, "
             f"schedule_days={self.schedule_days}, "
             f"schedule_time={self.schedule_time.strftime('%H:%M')}, "
@@ -149,8 +152,9 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         errors.append("MEERA_USER_ID must be a positive Telegram user id")
 
     threshold = _parse_float("TRIAGE_THRESHOLD", get("TRIAGE_THRESHOLD"), errors)
-    if not 0.0 <= threshold <= 1.0:
-        errors.append("TRIAGE_THRESHOLD must be between 0 and 1")
+    # Triage scores notes 0-10 (Components Map answer key).
+    if not 0.0 <= threshold <= 10.0:
+        errors.append("TRIAGE_THRESHOLD must be between 0 and 10")
 
     min_chars = _parse_int("DRAFT_MIN_CHARS", get("DRAFT_MIN_CHARS"), errors)
     max_chars = _parse_int("DRAFT_MAX_CHARS", get("DRAFT_MAX_CHARS"), errors)
@@ -165,6 +169,7 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         gemini_api_key=env["GEMINI_API_KEY"].strip(),
         triage_model=get("TRIAGE_MODEL"),
         draft_model=get("DRAFT_MODEL"),
+        transcribe_model=get("TRANSCRIBE_MODEL"),
         db_path=Path(get("DB_PATH")),
         schedule_days=_parse_days(get("SCHEDULE_DAYS"), errors),
         schedule_time=_parse_time(get("SCHEDULE_TIME"), errors),

@@ -9,6 +9,23 @@
 
 ---
 
+## 0. Alignment with the Components Map Answer Key (amended 24 Sep 2026)
+
+The session's **Components Map answer key** is authoritative. Where any later section differs, this table wins.
+
+| Actor (row) | Column | Answer key | How we build it |
+|---|---|---|---|
+| Meera (Founder) | Trigger | Drops **voice note** into Telegram | Capture channel accepts **voice notes (primary) and text**. |
+| Telegram | Input | Receives note, **transcribes to text** | `ingest.py` receives the `channel_post`; voice audio is downloaded and transcribed to text with Gemini (the Bot API gives no transcript). Transcript stored as the note's `content`. |
+| Gemini API (Triage) | Processing | Scores note **0–10**, publishability triage, **rejects low-score notes** | `triage.py` scores **0–10**; code rejects anything below `TRIAGE_THRESHOLD` (default **6**). |
+| Google News (Context) | Context | Fetches relevant industry news hook | `news.py` (Google News RSS) — **MUST-have**, feeds the draft step; still degrades to no-news on failure and is source-verified in code. |
+| Gemini API | AI | Drafts post in **Meera's voice (Skill)** + news hook | `draft.py` using a **voice skill** (`prompts/voice_skill.md`: her rules distilled from `corpus/`) + retrieved corpus exemplars + the news hook. |
+| Review Gate (Meera) | Output | Reviews draft, edits if needed → publishes to LinkedIn | Approve / Edit / Discard in Telegram; **Meera publishes to LinkedIn herself** — the system never does. |
+
+Consequences: voice capture (was S2) and news grounding (was S1) move into the **MUST-HAVE** set; triage scale is 0–10 everywhere.
+
+---
+
 ## 1. Executive Understanding
 
 We are building a **content drafting pipeline, not a publishing tool.** Meera Pillai already captures raw thoughts as notes into a private Telegram channel and will not change that habit `[DOC]`. The system's job is to pick up those notes, decide which ones are worth developing, draft a LinkedIn post *in her voice* from the good ones, optionally ground it against something current, and hand the finished draft back to her to review and post herself `[DOC]`.
@@ -127,7 +144,7 @@ Five representative raw fragments (clean-beauty musing, skin-barrier metaphor, a
 **Genuine gaps (Not specified in the provided material):**
 - **G1 — Cadence mechanism.** How often the pipeline runs and how it picks *which* 3 notes/week. `[GAP]` → `[REC]` a scheduled batch (e.g. Mon/Wed/Fri mornings) that drafts the single best un-drafted note each run; §7 details this.
 - **G2 — Voice grounding method.** Whether to fine-tune, few-shot, or retrieve from the corpus. `[GAP]` → `[REC]` few-shot with retrieved exemplars (no fine-tuning for MVP); §10.
-- **G3 — Voice notes / audio.** The case says `notes/` includes "voice note transcriptions," implying some capture is audio, but the live channel notes she'll post are `[GAP]` on format. → `[ASSUME]` MVP handles **text** posts; audio transcription is a SHOULD-HAVE (Telegram delivers voice as a file; transcribe with Gemini). §8.
+- **G3 — Voice notes / audio.** The case says `notes/` includes "voice note transcriptions," implying some capture is audio, but the live channel notes she'll post are `[GAP]` on format. → **Resolved by the answer key (§0):** voice notes are the primary capture; Telegram delivers voice as a file, which we transcribe with Gemini. Text posts are also accepted.
 - **G4 — Draft length/format target.** No stated length. `[GAP]` → `[REC]` match corpus norms (~150–450 words, no hashtags, no emoji).
 - **G5 — Where approved drafts go.** `[GAP]` → with review-in-Telegram, "Approve" marks it approved and gives her clean copy-paste text; LinkedIn API auto-post is LATER (§8).
 - **G6 — Data residency / privacy expectations.** `[GAP]` → `[REC]` store only note text + drafts; keep on a single region host; no third-party analytics.
@@ -284,7 +301,7 @@ Format: **USER ACTION → SYSTEM → AI → VALIDATION → DB → AUTOMATION →
 ### Flow B — Draft generation (happy path) `[DOC]`
 - **TRIGGER:** scheduler fires (Mon/Wed/Fri 07:30 IST).
 - **SYSTEM:** load `notes` where `status='new'`.
-- **AI #1 (triage):** Flash-Lite scores each note 0–1 for "worth developing" + assigns a category + one-line reason. Notes flagged "nothing new" score low.
+- **AI #1 (triage):** Flash-Lite scores each note 0–10 for "worth developing" + assigns a category + one-line reason. Notes flagged "nothing new" score low.
 - **VALIDATION:** valid JSON, score in range; pick the highest-scoring note above threshold. If none clears threshold, exit cleanly (see Flow F).
 - **SYSTEM:** select 2–3 corpus exemplars from the same category; fetch Google News RSS for the note's topic keywords.
 - **AI #2 (draft):** Flash writes a post in-voice, using exemplars; includes a current reference **only if** a fetched item is clearly relevant, with its source.
@@ -338,12 +355,13 @@ The MVP must prove the core hypothesis: **can automated, voice-matched drafts de
 - **M5** Scheduled cadence producing ~3 drafts/week. `[DOC — FR8]`
 - **M6** No public publishing; review gate is the terminal step. `[DOC — FR7/BR1]`
 - **M7** Secrets in env, structured logging, graceful AI/Telegram failure handling. `[REC — NFR3/NFR6]`
+- **M8** Voice-note capture → Gemini transcription → same pipeline. `[DOC — answer key §0; was S2]`
+- **M9** Google News RSS news hook, with source-citation guardrail and graceful no-news fallback. `[DOC — answer key §0; was S1]`
 
 *Why these:* remove any one and the core hypothesis can't be tested. M3 is the single riskiest requirement, so it gets the most eval attention (§14).
 
 ### SHOULD HAVE (fast follow, post-MVP)
-- **S1** Google News RSS current-context grounding, with source-citation guardrail. `[DOC — FR5; SHOULD not MUST because a voice-matched post with no news is still valuable, and news is the highest-hallucination-risk piece — ship the safe core first.]`
-- **S2** Voice-note (audio) capture → Gemini transcription → same pipeline. `[DOC implies audio exists in notes/]`
+- ~~S1~~ / ~~S2~~ moved to MUST (M9 / M8) per the answer key (§0).
 - **S3** "Redraft from a one-line instruction" in the Edit flow. `[REC]`
 - **S4** Learning from her edits: append approved final versions to the corpus so voice improves over time. `[REC — compounding value]`
 - **S5** A weekly digest ("3 drafts sent, 2 posted, 1 discarded").
@@ -371,14 +389,15 @@ Purpose: every raw fragment Meera posts.
 | `id` | INTEGER PK | yes | autoincrement |
 | `tg_message_id` | INTEGER | yes | Telegram message id; **UNIQUE** (idempotent ingest) |
 | `tg_chat_id` | INTEGER | yes | must equal configured capture chat id |
-| `content` | TEXT | yes | the note; reject empty/whitespace |
+| `content` | TEXT | yes | the note text, or the voice transcript; empty only while `pending_transcription` |
+| `tg_file_id` | TEXT | no | Telegram file id for voice notes (to download/transcribe) |
 | `content_type` | TEXT | yes | `text` \| `voice` \| `unsupported`; default `text` |
 | `created_at` | TIMESTAMP | yes | when posted |
-| `status` | TEXT | yes | `new` \| `drafted` \| `shelved`; default `new` |
+| `status` | TEXT | yes | `pending_transcription` \| `new` \| `drafted` \| `shelved`; default `new` |
 | `category` | TEXT | no | set by triage (e.g. `Ingredient Deep-Dive`) |
-| `score` | REAL | no | triage 0–1 |
+| `score` | REAL | no | triage 0–10 |
 
-Example: `{id:12, tg_message_id:481, content:"batch fourteen came back… pH dropped 0.4 units…", content_type:"text", status:"drafted", category:"Industry Transparency", score:0.82}`
+Example: `{id:12, tg_message_id:481, content:"batch fourteen came back… pH dropped 0.4 units…", content_type:"text", status:"drafted", category:"Industry Transparency", score:8.2}`
 
 ### Entity: `drafts`
 Purpose: each generated/edited draft, with review state and provenance.
@@ -429,7 +448,7 @@ Two model calls, both deterministic in *shape* (typed JSON), never an open-ended
 ### 10.2 Prompt architecture
 Three prompts, all as versioned files in `/prompts` (so Claude Code and you can iterate without touching logic):
 
-1. **`triage.md`** — input: one note + the list of categories from the corpus. Output JSON: `{worth_developing: bool, score: 0-1, category: str, reason: str, suggested_angle: str}`. Instruction highlights: score *low* when the note itself says "nothing new here"; score *high* when it contains a concrete incident + a claim (batch-14, cold-pressed, layering-order patterns). 
+1. **`triage.md`** — input: one note + the list of categories from the corpus. Output JSON: `{worth_developing: bool, score: 0-10, category: str, reason: str, suggested_angle: str}`. Instruction highlights: score *low* when the note itself says "nothing new here"; score *high* when it contains a concrete incident + a claim (batch-14, cold-pressed, layering-order patterns). 
 2. **`draft.md`** — input: the note, its category, 2–3 full corpus exemplars, optional news item(s). Output JSON: `{body: str, used_source_url: str|null, self_check: {invented_stats: bool, on_voice: bool}}`. Instruction highlights: mirror the exemplars' structure (concrete opening scene, patient paragraphs, "I'm not saying X, I'm saying Y", understated close, no emoji/hashtags/CTA, British spelling); use ONLY facts present in the note or the provided source; if unsure, leave it out; never invent statistics or studies.
 3. **`repair.md`** — used only when JSON parsing fails: "Return the same content as valid JSON matching this schema, nothing else."
 
@@ -566,7 +585,7 @@ skinstinct-content-engine/
 ### PHASE 3 — Ingest (capture)
 - **Objective:** store notes from `channel_post`; ignore everything else.
 - **Files:** `ingest.py`, wire into `app.py` (polling for now), `tests/test_ingest.py`.
-- **Implementation:** handler filters `channel_post` from `TELEGRAM_CHAT_ID`; extracts text (or caption); rejects empty; stores via `db.add_note`; non-text → `unsupported`. React 👍 on success (optional).
+- **Implementation:** handler filters `channel_post` from `TELEGRAM_CHAT_ID`; extracts text (or caption); rejects empty; stores via `db.add_note`. **Voice notes** are stored with `content_type='voice'`, their `tg_file_id`, and `status='pending_transcription'` (transcribed in Phase 4, once the Gemini client exists). Other non-text → `unsupported`.
 - **Claude Code instruction:** §13 Prompt 3.
 - **Expected result:** posting a note in the capture channel inserts one `notes` row; re-delivery doesn't duplicate.
 - **Verification:** run `app.py` in polling mode; post 3 notes; check DB has 3 rows; a sticker adds none/`unsupported`.
@@ -576,7 +595,7 @@ skinstinct-content-engine/
 ### PHASE 4 — Gemini client wrapper
 - **Objective:** one reliable place for model calls: JSON schema, retries, repair, timeouts.
 - **Files:** `gemini_client.py`, `prompts/repair.md`, `tests/test_gemini_client.py` (mock the SDK).
-- **Implementation:** `generate_json(prompt, schema, model)` → dict; exponential backoff on 5xx/429/timeout (3×); on JSON parse failure, one `repair.md` re-ask; raise a typed error on final failure. Never logs the key.
+- **Implementation:** `transcribe_audio(audio_bytes, mime_type, model) -> str` for voice notes (wired into ingest so `pending_transcription` notes become `new`); `generate_json(prompt, schema, model)` → dict; exponential backoff on 5xx/429/timeout (3×); on JSON parse failure, one `repair.md` re-ask; raise a typed error on final failure. Never logs the key.
 - **Claude Code instruction:** §13 Prompt 4.
 - **Expected result / verification:** unit tests with a mocked SDK cover success, retry-then-success, invalid-JSON-then-repair, hard-fail. A tiny live smoke script returns JSON from Gemini.
 - **Failure modes:** using the deprecated `google-generativeai` SDK; blocking calls freezing the async bot (run model calls in a thread executor); infinite retry.
@@ -595,7 +614,7 @@ skinstinct-content-engine/
 ### PHASE 6 — Corpus + drafting (the heart)
 - **Objective:** voice-matched draft from a note using retrieved exemplars, with validation.
 - **Files:** `corpus/` (15 files + index — you paste the published pieces from Doc C), `draft.py`, `prompts/draft.md`, `tests/test_draft.py`.
-- **Implementation:** `load_corpus()`; `pick_exemplars(category, n=3)`; `make_draft(note, category, exemplars, news=None) -> Draft`; then **validators** (length, source-URL match, no-invented-stats, self_check) with one redraft on failure and fail-safe skip.
+- **Implementation:** `prompts/voice_skill.md` — Meera's voice skill distilled from `corpus/` (structure, stance, register, negative rules); `load_corpus()`; `pick_exemplars(category, n=3)`; `make_draft(note, category, exemplars, news=None) -> Draft`; then **validators** (length, source-URL match, no-invented-stats, self_check) with one redraft on failure and fail-safe skip.
 - **Claude Code instruction:** §13 Prompt 6.
 - **Expected result:** a draft that reads like Meera — concrete opening, patient paragraphs, understated close, no emoji/hashtags, no invented numbers.
 - **Verification:** generate drafts for the 5 sample notes; run the **voice checklist** (§14 AI tests) by eye and with an automated "no emoji/no hashtag/length/invented-stat" test. Compare against the 15 originals.

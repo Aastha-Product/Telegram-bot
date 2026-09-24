@@ -2,4 +2,5 @@
 
 from __future__ import annotations
 
-# TODO(Phase 6): load_corpus, pick_exemplars, make_draft, validators.
+# TODO(Phase 6): voice skill (prompts/voice_skill.md), load_corpus, pick_exemplars,
+# make_draft (+ news hook), validators.

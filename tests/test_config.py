@@ -20,11 +20,12 @@ def test_loads_required_and_defaults() -> None:
     assert s.meera_user_id == 987654321
     assert s.triage_model == "gemini-3.5-flash-lite"
     assert s.draft_model == "gemini-3.5-flash"
+    assert s.transcribe_model == "gemini-3.5-flash"
     assert s.db_path == Path("skinstinct.db")
     assert s.schedule_days == ("mon", "wed", "fri")
     assert s.schedule_time == time(7, 30)
     assert s.timezone.key == "Asia/Kolkata"
-    assert s.triage_threshold == 0.6
+    assert s.triage_threshold == 6.0
     assert (s.draft_min_chars, s.draft_max_chars) == (200, 3000)
 
 
@@ -62,7 +63,8 @@ def test_capture_chat_id_must_be_channel_id() -> None:
     ("name", "value"),
     [
         ("MEERA_USER_ID", "not-a-number"),
-        ("TRIAGE_THRESHOLD", "1.5"),
+        ("TRIAGE_THRESHOLD", "11"),
+        ("TRIAGE_THRESHOLD", "-1"),
         ("SCHEDULE_DAYS", "monday"),
         ("SCHEDULE_TIME", "7.30am"),
         ("TIMEZONE", "Mars/Olympus"),
@@ -87,3 +89,7 @@ def test_error_messages_never_contain_secret_values() -> None:
     with pytest.raises(ConfigError) as exc:
         load_settings({**VALID_ENV, "TELEGRAM_CHAT_ID": "oops"})
     assert "SECRET" not in str(exc.value)
+
+
+def test_threshold_uses_zero_to_ten_scale() -> None:
+    assert load_settings({**VALID_ENV, "TRIAGE_THRESHOLD": "7.5"}).triage_threshold == 7.5
