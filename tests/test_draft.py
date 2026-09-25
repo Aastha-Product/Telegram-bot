@@ -367,3 +367,15 @@ def test_unclear_severity_is_treated_as_blocking(model: dict) -> None:
            "idea_note": "", "voice_issues": []}
     model["qa"] += [odd, odd]
     assert _make() is None
+
+
+def test_spoken_decimals_in_the_note_allow_the_digits() -> None:
+    note = "the pH dropped by about zero point four units, and viscosity by point two five, then two point five"
+    assert draft.unsupported_numbers("pH fell 0.4 units; viscosity 0.25; later 2.5", note) == []
+    assert draft.unsupported_numbers("pH fell 0.5 units", note) == ["0.5"]
+    assert draft.unsupported_numbers("it was 4 units", "zero point four") == ["4"]  # 0.4 does not license 4
+
+
+def test_spoken_decimal_does_not_break_other_number_words() -> None:
+    assert draft.known_numbers("batch fourteen, zero point four") >= {"14", "0.4"}
+    assert "0.4" not in draft.known_numbers("the main point for us")  # "point" alone is not a number

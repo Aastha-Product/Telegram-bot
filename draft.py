@@ -174,6 +174,12 @@ _NUMBER_WORD_RE = re.compile(r"\b(" + "|".join(NUMBER_WORDS) + r")(?:[- ](one|tw
                              re.IGNORECASE)
 
 
+_DIGIT_WORDS: dict[str, str] = {"zero": "0", "oh": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+                                "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9"}
+# Spoken decimals such as "zero point four" or "point four": voice notes rarely contain digits.
+_DECIMAL_WORD_RE = re.compile(r"(?:\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+)?\bpoint((?:\s+(?:zero|oh|one|two|three|four|five|six|seven|eight|nine)\b)+)", re.IGNORECASE)
+
+
 def _canonical(number: str) -> str:
     """'1,000' and '1000' match; '0.40' and '0.4' match."""
     number = number.replace(",", "")
@@ -185,7 +191,13 @@ def _canonical(number: str) -> str:
 def known_numbers(source_text: str) -> set[str]:
     """Every number the draft may use: digits in the sources plus spelled-out numbers ('batch fourteen')."""
     found = {_canonical(n) for n in NUMBER_RE.findall(source_text)}
-    for tens, unit in _NUMBER_WORD_RE.findall(source_text):
+    for whole, fraction in _DECIMAL_WORD_RE.findall(source_text):
+        integer = str(NUMBER_WORDS[whole.lower()]) if whole else "0"
+        digits = "".join(_DIGIT_WORDS[w.lower()] for w in fraction.split())
+        found.add(_canonical(f"{integer}.{digits}"))
+    # Spoken decimals are consumed first, so "zero point four" licenses 0.4 but not 0 or 4.
+    remaining = _DECIMAL_WORD_RE.sub(" ", source_text)
+    for tens, unit in _NUMBER_WORD_RE.findall(remaining):
         value = NUMBER_WORDS[tens.lower()] + (NUMBER_WORDS[unit.lower()] if unit else 0)
         found.add(str(value))
     return found
