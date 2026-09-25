@@ -38,6 +38,8 @@ Add a hard_flags entry (type, detail, and a verbatim quote from the note) for an
 
 Allowed types: {flag_types}. If there is nothing to flag, return an empty list. Do not flag ordinary first-hand observations. An unnamed supplier or an unnamed customer is fine.
 
+Hard flags are only for content that would be risky to publish. A note that is simply off-topic, outside her expertise, too thin, or a request to write about something unrelated (for example another industry or brand) is NOT a hard flag: score it low on founder_relevance, authenticity, originality and postability, with guardrail "fail" where it applies, and return no hard_flags. Meera saying what she wants to write about is not fabricated information and not unattributable; it is just a weak note.
+
 # Also return
 - summary: core_idea, founder_perspective, intended_audience, main_insight and topic (a few words), each one sentence, using only the note
 - category: one of {categories}
