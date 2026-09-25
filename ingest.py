@@ -51,17 +51,45 @@ def is_capture_post(update: Update) -> bool:
     return post is not None and post.chat.id == config.settings.telegram_chat_id
 
 
-async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Store a capture-channel post as a note. Never raises: a bad post must not stop the bot."""
+def sender_of(post: Message) -> str:
+    """Who posted: channel posts usually carry a signature or the channel itself, not a user."""
+    if post.from_user is not None:
+        return f"user:{post.from_user.id}"
+    if post.author_signature:
+        return f"signature:{post.author_signature}"
+    if post.sender_chat is not None:
+        return f"chat:{post.sender_chat.id}"
+    return "unknown"
+
+
+def unclear_ratio(text: str) -> float:
+    """Share of words the transcriber marked [unclear]."""
+    words = len(text.split())
+    return round(text.count("[unclear]") / words, 3) if words else 1.0
+
+
+def is_low_confidence(note: db.Note) -> bool:
+    """A voice transcript we can't trust must not be scored or drafted from."""
+    if note.content_type != "voice":
+        return False
+    ratio = note.unclear_ratio if note.unclear_ratio is not None else 0.0
+    return note.transcript_clarity == "low" or ratio > config.settings.transcript_max_unclear_ratio
+
+
+async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    """Store a capture-channel post as a note; return its id if it is ready for triage.
+
+    Never raises: a bad post must not stop the bot.
+    """
     # The handler filter already restricts this, but the gate is enforced here too.
     if not is_capture_post(update):
         log.warning("ingest.rejected update_id=%s reason=not_capture_channel", update.update_id)
-        return
+        return None
     post = update.channel_post
     note = extract_note(post)
     if note is None:
         log.info("ingest.skipped message_id=%s reason=empty", post.message_id)
-        return
+        return None
     try:
         note_id = await asyncio.to_thread(
             db.add_note,
@@ -72,19 +100,23 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             note.content_type,
             note.tg_file_id,
             note.status,
+            sender_of(post),
         )
     except Exception:
         log.exception("ingest.failed message_id=%s content_type=%s", post.message_id, note.content_type)
-        return
+        return None
     if note_id is None:
         log.info("ingest.duplicate message_id=%s", post.message_id)
-        return
+        return None
     log.info("ingest.stored note_id=%s message_id=%s content_type=%s status=%s chars=%d",
              note_id, post.message_id, note.content_type, note.status, len(note.content))
+    if note.status == "new":
+        return note_id
     if note.status == "pending_transcription":
         stored = await asyncio.to_thread(db.get_note, note_id)
-        if stored is not None:
-            await transcribe_note(context.bot, stored)
+        if stored is not None and await transcribe_note(context.bot, stored):
+            return note_id
+    return None
 
 
 async def transcribe_note(bot: Bot, note: db.Note) -> bool:
@@ -98,8 +130,9 @@ async def transcribe_note(bot: Bot, note: db.Note) -> bool:
         transcript = await gemini_client.transcribe_audio(
             audio, gemini_client.TELEGRAM_VOICE_MIME, config.settings.transcribe_model
         )
-        content = f"{note.content}\n\n{transcript}" if note.content else transcript
-        updated = await asyncio.to_thread(db.set_note_transcript, note.id, content)
+        ratio = unclear_ratio(transcript.text)
+        content = f"{note.content}\n\n{transcript.text}" if note.content else transcript.text
+        updated = await asyncio.to_thread(db.set_note_transcript, note.id, content, transcript.clarity, ratio)
     except (TelegramError, gemini_client.GeminiError) as exc:
         log.warning("ingest.transcribe_failed note_id=%s error=%s", note.id, exc)
         return False
@@ -107,7 +140,8 @@ async def transcribe_note(bot: Bot, note: db.Note) -> bool:
         log.exception("ingest.transcribe_failed note_id=%s", note.id)
         return False
     if updated:
-        log.info("ingest.transcribed note_id=%s chars=%d", note.id, len(content))
+        log.info("ingest.transcribed note_id=%s chars=%d clarity=%s unclear_ratio=%.3f languages=%s",
+                 note.id, len(content), transcript.clarity, ratio, ",".join(transcript.languages))
     return updated
 
 

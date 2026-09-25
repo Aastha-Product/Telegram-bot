@@ -39,6 +39,10 @@ DEFAULTS: dict[str, str] = {
     "DRAFT_MIN_CHARS": "200",
     "DRAFT_MAX_CHARS": "3000",
     "PORT": "8080",
+    "TRANSCRIPT_MAX_UNCLEAR_RATIO": "0.2",
+    "QA_MODEL": "gemini-3.5-flash",
+    "SWEEP_INTERVAL_MINUTES": "60",
+    "MAX_REGENERATIONS": "3",
 }
 
 # Telegram's secret_token allows 1-256 of these characters; we also require some length.
@@ -74,6 +78,10 @@ class Settings:
     public_url: str | None = None
     webhook_secret: str | None = None
     port: int = 8080
+    transcript_max_unclear_ratio: float = 0.2
+    qa_model: str = "gemini-3.5-flash"
+    sweep_interval_minutes: int = 60
+    max_regenerations: int = 3
 
     @property
     def webhook_mode(self) -> bool:
@@ -100,7 +108,11 @@ class Settings:
             f"draft_chars=[{self.draft_min_chars}, {self.draft_max_chars}], "
             f"public_url={self.public_url!r}, "
             f"webhook_secret={_mask(self.webhook_secret or '')}, "
-            f"port={self.port})"
+            f"port={self.port}, "
+            f"qa_model={self.qa_model!r}, "
+            f"transcript_max_unclear_ratio={self.transcript_max_unclear_ratio}, "
+            f"sweep_interval_minutes={self.sweep_interval_minutes}, "
+            f"max_regenerations={self.max_regenerations})"
         )
 
     __str__ = __repr__
@@ -200,6 +212,15 @@ def load_settings(env: Mapping[str, str]) -> Settings:
             errors.append("PUBLIC_URL must start with https:// (Telegram webhooks require HTTPS)")
         if webhook_secret is None or not WEBHOOK_SECRET_RE.match(webhook_secret):
             errors.append("WEBHOOK_SECRET is required with PUBLIC_URL: 16-256 characters of A-Z, a-z, 0-9, _ or -")
+    unclear_ratio = _parse_float("TRANSCRIPT_MAX_UNCLEAR_RATIO", get("TRANSCRIPT_MAX_UNCLEAR_RATIO"), errors)
+    if not 0.0 <= unclear_ratio <= 1.0:
+        errors.append("TRANSCRIPT_MAX_UNCLEAR_RATIO must be between 0 and 1")
+    sweep_minutes = _parse_int("SWEEP_INTERVAL_MINUTES", get("SWEEP_INTERVAL_MINUTES"), errors)
+    if sweep_minutes < 5:
+        errors.append("SWEEP_INTERVAL_MINUTES must be at least 5")
+    max_regenerations = _parse_int("MAX_REGENERATIONS", get("MAX_REGENERATIONS"), errors)
+    if max_regenerations < 0:
+        errors.append("MAX_REGENERATIONS must be 0 or more")
     port = _parse_int("PORT", get("PORT"), errors)
     if not 0 < port < 65536:
         errors.append("PORT must be between 1 and 65535")
@@ -226,6 +247,10 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         public_url=public_url,
         webhook_secret=webhook_secret,
         port=port,
+        transcript_max_unclear_ratio=unclear_ratio,
+        qa_model=get("QA_MODEL"),
+        sweep_interval_minutes=sweep_minutes,
+        max_regenerations=max_regenerations,
     )
     if errors:
         raise ConfigError("Invalid configuration: " + "; ".join(errors))

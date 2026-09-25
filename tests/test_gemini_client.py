@@ -160,24 +160,46 @@ def test_repair_call_is_also_retried(monkeypatch, sleeps) -> None:
 # --- transcribe_audio ----------------------------------------------------------
 
 
-def _transcribe(audio: bytes = b"OggS...") -> str:
+def _transcribe(audio: bytes = b"OggS...") -> gemini_client.Transcript:
     return asyncio.run(gemini_client.transcribe_audio(audio, "audio/ogg", "gemini-3.5-flash"))
 
 
-def test_transcribe_sends_prompt_and_audio(monkeypatch, sleeps) -> None:
-    models = _install(monkeypatch, ["  batch fourteen came back with a pH drift  "])
-    assert _transcribe(b"OggS-audio") == "batch fourteen came back with a pH drift"
+def _t(text, clarity="high", languages=("English",)) -> str:
+    return json.dumps({"transcript": text, "clarity": clarity, "languages": list(languages)})
+
+
+def test_transcribe_sends_prompt_and_audio_and_returns_clarity(monkeypatch, sleeps) -> None:
+    models = _install(monkeypatch, [_t("  batch fourteen came back with a pH drift  ", "medium")])
+    result = _transcribe(b"OggS-audio")
+    assert result == gemini_client.Transcript("batch fourteen came back with a pH drift", "medium", ["English"])
     [call] = models.calls
     prompt, part = call["contents"]
     assert "verbatim" in prompt.lower()
     assert part.inline_data.data == b"OggS-audio"
     assert part.inline_data.mime_type == "audio/ogg"
+    assert call["config"].response_json_schema == gemini_client.TRANSCRIPT_SCHEMA
 
 
-@pytest.mark.parametrize("reply", ["", "   ", None])
+def test_mixed_language_is_reported(monkeypatch, sleeps) -> None:
+    _install(monkeypatch, [_t("yeh batch fourteen ka issue hai", languages=("English", "Hindi"))])
+    assert _transcribe().languages == ["English", "Hindi"]
+
+
+def test_unknown_clarity_is_treated_as_low(monkeypatch, sleeps) -> None:
+    _install(monkeypatch, [json.dumps({"transcript": "words", "clarity": "great", "languages": []})])
+    assert _transcribe().clarity == "low"
+
+
+@pytest.mark.parametrize("reply", ["", "   "])
 def test_empty_transcript_is_an_error(monkeypatch, sleeps, reply) -> None:
-    _install(monkeypatch, [reply])
+    _install(monkeypatch, [_t(reply, "low")])
     with pytest.raises(gemini_client.GeminiError, match="empty"):
+        _transcribe()
+
+
+def test_non_json_transcription_is_repaired_then_fails(monkeypatch, sleeps) -> None:
+    _install(monkeypatch, ["plain words, not json", "still not json"])
+    with pytest.raises(gemini_client.GeminiError, match="invalid JSON"):
         _transcribe()
 
 
@@ -189,8 +211,8 @@ def test_no_audio_fails_without_calling_model(monkeypatch, sleeps) -> None:
 
 
 def test_transcribe_retries_server_errors(monkeypatch, sleeps) -> None:
-    _install(monkeypatch, [_api_error(errors.ServerError, 503, "UNAVAILABLE"), "a transcript"])
-    assert _transcribe() == "a transcript"
+    _install(monkeypatch, [_api_error(errors.ServerError, 503, "UNAVAILABLE"), _t("a transcript")])
+    assert _transcribe().text == "a transcript"
 
 
 # --- prompts -------------------------------------------------------------------

@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import config
 
@@ -84,7 +85,50 @@ MIGRATIONS: tuple[str, ...] = (
     PRAGMA user_version = 3;
     COMMIT;
     """,
+    """
+    BEGIN;
+    ALTER TABLE notes ADD COLUMN sender TEXT;
+    ALTER TABLE notes ADD COLUMN transcript_clarity TEXT;
+    ALTER TABLE notes ADD COLUMN unclear_ratio REAL;
+
+    CREATE TABLE assessments (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        note_id              INTEGER NOT NULL REFERENCES notes (id) ON DELETE CASCADE,
+        created_at           TIMESTAMP NOT NULL,
+        model                TEXT NOT NULL,
+        rubric_version       TEXT NOT NULL,
+        topic                TEXT,
+        summary_json         TEXT NOT NULL,
+        parameters_json      TEXT NOT NULL,
+        hard_flags_json      TEXT NOT NULL,
+        overall              REAL NOT NULL CHECK (overall BETWEEN 0 AND 10),
+        decision             TEXT NOT NULL CHECK (decision IN ('qualified', 'rejected', 'human_review')),
+        scorecard_message_id INTEGER
+    );
+    CREATE INDEX idx_assessments_note ON assessments (note_id);
+
+    ALTER TABLE drafts ADD COLUMN news_json TEXT;
+    ALTER TABLE drafts ADD COLUMN qa_json TEXT;
+
+    CREATE TABLE final_posts (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        note_id           INTEGER NOT NULL REFERENCES notes (id) ON DELETE CASCADE,
+        draft_id          INTEGER NOT NULL UNIQUE REFERENCES drafts (id) ON DELETE CASCADE,
+        ai_draft_body     TEXT NOT NULL,
+        final_body        TEXT NOT NULL,
+        edited_by_meera   INTEGER NOT NULL,
+        approved_at       TIMESTAMP NOT NULL,
+        publishing_status TEXT NOT NULL DEFAULT 'awaiting_manual_post'
+                          CHECK (publishing_status IN ('awaiting_manual_post', 'posted')),
+        posted_at         TIMESTAMP
+    );
+    PRAGMA user_version = 4;
+    COMMIT;
+    """,
 )
+
+DECISIONS: tuple[str, ...] = ("qualified", "rejected", "human_review")
+MEERA_EDIT_MODEL = "meera-edit"
 
 _db_path: Path | None = None
 
@@ -105,6 +149,9 @@ class Note:
     triage_reason: str | None = None
     angle: str | None = None
     news_keywords: str | None = None
+    sender: str | None = None
+    transcript_clarity: str | None = None
+    unclear_ratio: float | None = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +168,37 @@ class Draft:
     reviewed_at: datetime | None
     review_message_id: int | None = None
     awaiting_edit: bool = False
+    news: dict[str, Any] | None = None
+    qa: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class Assessment:
+    id: int
+    note_id: int
+    created_at: datetime
+    model: str
+    rubric_version: str
+    topic: str | None
+    summary: dict[str, Any]
+    parameters: list[dict[str, Any]]
+    hard_flags: list[dict[str, Any]]
+    overall: float
+    decision: str
+    scorecard_message_id: int | None
+
+
+@dataclass(frozen=True)
+class FinalPost:
+    id: int
+    note_id: int
+    draft_id: int
+    ai_draft_body: str
+    final_body: str
+    edited_by_meera: bool
+    approved_at: datetime
+    publishing_status: str
+    posted_at: datetime | None
 
 
 @dataclass(frozen=True)
@@ -199,6 +277,7 @@ def add_note(
     content_type: str = "text",
     tg_file_id: str | None = None,
     status: str = "new",
+    sender: str | None = None,
 ) -> int | None:
     """Insert a note; return its id, or None if this Telegram message was already stored.
 
@@ -214,13 +293,13 @@ def add_note(
         row = conn.execute(
             """
             INSERT INTO notes (tg_message_id, tg_chat_id, content, content_type,
-                               tg_file_id, created_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                               tg_file_id, created_at, status, sender)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (tg_chat_id, tg_message_id) DO NOTHING
             RETURNING id
             """,
             (tg_message_id, tg_chat_id, content, content_type, tg_file_id,
-             _to_iso(created_at), status),
+             _to_iso(created_at), status, sender),
         ).fetchone()
     return row["id"] if row else None
 
@@ -249,7 +328,8 @@ def get_pending_transcriptions() -> list[Note]:
     return [_row_to_note(r) for r in rows]
 
 
-def set_note_transcript(note_id: int, content: str) -> bool:
+def set_note_transcript(note_id: int, content: str, clarity: str | None = None,
+                        unclear_ratio: float | None = None) -> bool:
     """Store a voice note's text and release it to triage; False if it wasn't pending."""
     content = content.strip()
     if not content:
@@ -257,10 +337,10 @@ def set_note_transcript(note_id: int, content: str) -> bool:
     with _connect() as conn:
         cur = conn.execute(
             """
-            UPDATE notes SET content = ?, status = 'new'
+            UPDATE notes SET content = ?, status = 'new', transcript_clarity = ?, unclear_ratio = ?
             WHERE id = ? AND status = 'pending_transcription'
             """,
-            (content, note_id),
+            (content, clarity, unclear_ratio, note_id),
         )
     return cur.rowcount == 1
 
@@ -313,7 +393,85 @@ def _row_to_note(row: sqlite3.Row) -> Note:
         triage_reason=row["triage_reason"],
         angle=row["angle"],
         news_keywords=row["news_keywords"],
+        sender=row["sender"],
+        transcript_clarity=row["transcript_clarity"],
+        unclear_ratio=row["unclear_ratio"],
     )
+
+
+def get_unassessed_notes() -> list[Note]:
+    """Notes ready for triage that have never been assessed (e.g. Gemini was down), oldest first."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM notes n
+            WHERE n.status = 'new' AND NOT EXISTS (SELECT 1 FROM assessments a WHERE a.note_id = n.id)
+            ORDER BY n.created_at, n.id
+            """
+        ).fetchall()
+    return [_row_to_note(r) for r in rows]
+
+
+# --- assessments -----------------------------------------------------------------
+
+
+def add_assessment(
+    note_id: int,
+    model: str,
+    rubric_version: str,
+    topic: str | None,
+    summary: dict[str, Any],
+    parameters: list[dict[str, Any]],
+    hard_flags: list[dict[str, Any]],
+    overall: float,
+    decision: str,
+) -> int:
+    """Store one complete, auditable triage verdict."""
+    _check(decision, DECISIONS, "decision")
+    if not 0.0 <= overall <= 10.0:
+        raise ValueError("overall must be between 0 and 10")
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            INSERT INTO assessments (note_id, created_at, model, rubric_version, topic, summary_json,
+                                     parameters_json, hard_flags_json, overall, decision)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
+            """,
+            (note_id, _now(), model, rubric_version, topic, json.dumps(summary),
+             json.dumps(parameters), json.dumps(hard_flags), overall, decision),
+        ).fetchone()
+    return row["id"]
+
+
+def get_latest_assessment(note_id: int) -> Assessment | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM assessments WHERE note_id = ? ORDER BY id DESC LIMIT 1", (note_id,)
+        ).fetchone()
+    if row is None:
+        return None
+    return Assessment(
+        id=row["id"],
+        note_id=row["note_id"],
+        created_at=_from_iso(row["created_at"]),
+        model=row["model"],
+        rubric_version=row["rubric_version"],
+        topic=row["topic"],
+        summary=json.loads(row["summary_json"]),
+        parameters=json.loads(row["parameters_json"]),
+        hard_flags=json.loads(row["hard_flags_json"]),
+        overall=row["overall"],
+        decision=row["decision"],
+        scorecard_message_id=row["scorecard_message_id"],
+    )
+
+
+def set_scorecard_message(assessment_id: int, message_id: int) -> bool:
+    with _connect() as conn:
+        cur = conn.execute("UPDATE assessments SET scorecard_message_id = ? WHERE id = ?",
+                           (message_id, assessment_id))
+    return cur.rowcount == 1
 
 
 # --- drafts --------------------------------------------------------------------
@@ -325,6 +483,8 @@ def add_draft(
     model: str,
     exemplar_ids: list[int] | None = None,
     source_url: str | None = None,
+    news: dict[str, Any] | None = None,
+    qa: dict[str, Any] | None = None,
 ) -> int:
     """Insert the next revision of a draft for a note; return the new draft id."""
     if not body.strip():
@@ -334,15 +494,23 @@ def add_draft(
         row = conn.execute(
             """
             INSERT INTO drafts (note_id, revision, body, model, exemplar_ids,
-                                source_url, created_at)
+                                source_url, created_at, news_json, qa_json)
             VALUES (?, (SELECT COALESCE(MAX(revision), 0) + 1 FROM drafts WHERE note_id = ?),
-                    ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?)
             RETURNING id
             """,
             (note_id, note_id, body, model, json.dumps(exemplar_ids or []),
-             source_url, _now()),
+             source_url, _now(), _json_or_none(news), _json_or_none(qa)),
         ).fetchone()
     return row["id"]
+
+
+def _json_or_none(value: dict[str, Any] | None) -> str | None:
+    return None if value is None else json.dumps(value)
+
+
+def _loads_or_none(value: str | None) -> dict[str, Any] | None:
+    return None if value is None else json.loads(value)
 
 
 def get_draft(draft_id: int) -> Draft | None:
@@ -384,6 +552,8 @@ def _row_to_draft(row: sqlite3.Row) -> Draft:
         reviewed_at=_from_iso(row["reviewed_at"]),
         review_message_id=row["review_message_id"],
         awaiting_edit=row["awaiting_edit_at"] is not None,
+        news=_loads_or_none(row["news_json"]),
+        qa=_loads_or_none(row["qa_json"]),
     )
 
 
@@ -435,10 +605,12 @@ def clear_edit(draft_id: int) -> None:
         conn.execute("UPDATE drafts SET awaiting_edit_at = NULL WHERE id = ?", (draft_id,))
 
 
-def add_revision(previous_id: int, body: str, model: str) -> int | None:
+def add_revision(previous_id: int, body: str, model: str, qa: dict[str, Any] | None = None,
+                 news: dict[str, Any] | None = None, replace_news: bool = False) -> int | None:
     """Supersede a pending draft with a new revision in one transaction; None if it wasn't pending.
 
     Doing both in one transaction guarantees a note never has two drafts pending review.
+    News context carries over unless replace_news is set (a regenerated draft may cite other news).
     """
     if not body.strip():
         raise ValueError("draft body must not be empty")
@@ -454,15 +626,89 @@ def add_revision(previous_id: int, body: str, model: str) -> int | None:
             return None
         row = conn.execute(
             """
-            INSERT INTO drafts (note_id, revision, body, model, exemplar_ids, source_url, created_at)
+            INSERT INTO drafts (note_id, revision, body, model, exemplar_ids, source_url, created_at,
+                                news_json, qa_json)
             SELECT note_id, (SELECT MAX(revision) + 1 FROM drafts d2 WHERE d2.note_id = d.note_id),
-                   ?, ?, exemplar_ids, source_url, ?
+                   ?, ?, exemplar_ids,
+                   CASE WHEN ? THEN ? ELSE source_url END, ?,
+                   CASE WHEN ? THEN ? ELSE news_json END, ?
             FROM drafts d WHERE id = ?
             RETURNING id
             """,
-            (body, model, _now(), previous_id),
+            (body, model, replace_news, (news or {}).get("url"), _now(),
+             replace_news, _json_or_none(news), _json_or_none(qa), previous_id),
         ).fetchone()
     return row["id"]
+
+
+def count_revisions(note_id: int) -> int:
+    with _connect() as conn:
+        return conn.execute("SELECT COUNT(*) FROM drafts WHERE note_id = ?", (note_id,)).fetchone()[0]
+
+
+# --- approval & final posts --------------------------------------------------------
+
+
+def approve_draft(draft_id: int) -> bool:
+    """Approve a pending draft and store the final text separately from the AI draft, atomically.
+
+    The AI draft is the latest model-written revision at or before the approved one, so an
+    approved Meera rewrite keeps the AI version it replaced (useful later as voice feedback).
+    """
+    now = _now()
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            UPDATE drafts SET status = 'approved', reviewed_at = ?, awaiting_edit_at = NULL
+            WHERE id = ? AND status = 'pending_review'
+            """,
+            (now, draft_id),
+        )
+        if cur.rowcount != 1:
+            return False
+        approved = conn.execute("SELECT * FROM drafts WHERE id = ?", (draft_id,)).fetchone()
+        ai = conn.execute(
+            """
+            SELECT body FROM drafts WHERE note_id = ? AND revision <= ? AND model != ?
+            ORDER BY revision DESC LIMIT 1
+            """,
+            (approved["note_id"], approved["revision"], MEERA_EDIT_MODEL),
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO final_posts (note_id, draft_id, ai_draft_body, final_body, edited_by_meera, approved_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (approved["note_id"], draft_id, ai["body"] if ai else approved["body"], approved["body"],
+             int(approved["model"] == MEERA_EDIT_MODEL), now),
+        )
+    return True
+
+
+def get_final_post(draft_id: int) -> FinalPost | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM final_posts WHERE draft_id = ?", (draft_id,)).fetchone()
+    if row is None:
+        return None
+    return FinalPost(
+        id=row["id"], note_id=row["note_id"], draft_id=row["draft_id"], ai_draft_body=row["ai_draft_body"],
+        final_body=row["final_body"], edited_by_meera=bool(row["edited_by_meera"]),
+        approved_at=_from_iso(row["approved_at"]), publishing_status=row["publishing_status"],
+        posted_at=_from_iso(row["posted_at"]),
+    )
+
+
+def mark_posted(draft_id: int) -> bool:
+    """Meera confirms she posted it herself; False if unknown or already marked."""
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            UPDATE final_posts SET publishing_status = 'posted', posted_at = ?
+            WHERE draft_id = ? AND publishing_status = 'awaiting_manual_post'
+            """,
+            (_now(), draft_id),
+        )
+    return cur.rowcount == 1
 
 
 # --- runs ----------------------------------------------------------------------

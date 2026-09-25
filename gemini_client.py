@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,25 @@ _client: genai.Client | None = None
 
 class GeminiError(Exception):
     """A model call failed for good (after retries/repair). Message never contains the API key."""
+
+
+CLARITY_LEVELS: tuple[str, ...] = ("high", "medium", "low")
+TRANSCRIPT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "transcript": {"type": "string"},
+        "clarity": {"type": "string", "enum": list(CLARITY_LEVELS)},
+        "languages": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["transcript", "clarity", "languages"],
+}
+
+
+@dataclass(frozen=True)
+class Transcript:
+    text: str
+    clarity: str  # the model's own estimate; Gemini reports no numeric confidence
+    languages: list[str]
 
 
 def load_prompt(name: str) -> str:
@@ -116,14 +136,16 @@ def _parse_json(text: str | None, schema: dict[str, Any]) -> dict[str, Any] | No
     return data
 
 
-async def generate_json(prompt: str, schema: dict[str, Any], model: str) -> dict[str, Any]:
+async def generate_json(prompt: str, schema: dict[str, Any], model: str,
+                        attachments: list[types.Part] | None = None) -> dict[str, Any]:
     """Ask for JSON matching `schema`; one repair re-ask if the reply is unusable."""
     gen_config = types.GenerateContentConfig(
         response_mime_type="application/json",
         response_json_schema=schema,
         automatic_function_calling=_NO_TOOLS,
     )
-    response = await _generate(model, prompt, gen_config)
+    contents: Any = [prompt, *attachments] if attachments else prompt
+    response = await _generate(model, contents, gen_config)
     data = _parse_json(response.text, schema)
     if data is not None:
         return data
@@ -138,13 +160,15 @@ async def generate_json(prompt: str, schema: dict[str, Any], model: str) -> dict
     return data
 
 
-async def transcribe_audio(audio: bytes, mime_type: str, model: str) -> str:
-    """Verbatim transcript of a voice note. Raises GeminiError if nothing intelligible came back."""
+async def transcribe_audio(audio: bytes, mime_type: str, model: str) -> Transcript:
+    """Verbatim transcript plus the model's clarity estimate. Raises GeminiError if no speech came back."""
     if not audio:
         raise GeminiError("no audio to transcribe")
-    contents = [load_prompt("transcribe"), types.Part.from_bytes(data=audio, mime_type=mime_type)]
-    response = await _generate(model, contents, types.GenerateContentConfig(automatic_function_calling=_NO_TOOLS))
-    transcript = (response.text or "").strip()
-    if not transcript:
+    data = await generate_json(load_prompt("transcribe"), TRANSCRIPT_SCHEMA, model,
+                               attachments=[types.Part.from_bytes(data=audio, mime_type=mime_type)])
+    text = str(data["transcript"]).strip()
+    if not text:
         raise GeminiError("transcription came back empty")
-    return transcript
+    clarity = data["clarity"] if data["clarity"] in CLARITY_LEVELS else "low"  # unknown means untrusted
+    languages = [str(x) for x in data["languages"]] if isinstance(data["languages"], list) else []
+    return Transcript(text=text, clarity=clarity, languages=languages)

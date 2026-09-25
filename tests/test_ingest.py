@@ -68,12 +68,14 @@ def transcriber(monkeypatch: pytest.MonkeyPatch) -> list:
     """Replace Gemini transcription; append a string (transcript) or exception per call."""
     script: list = []
 
-    async def fake_transcribe(audio: bytes, mime_type: str, model: str) -> str:
+    async def fake_transcribe(audio: bytes, mime_type: str, model: str) -> gemini_client.Transcript:
         assert (mime_type, model) == ("audio/ogg", config.settings.transcribe_model)
         item = script.pop(0)
         if isinstance(item, Exception):
             raise item
-        return item
+        if isinstance(item, gemini_client.Transcript):
+            return item
+        return gemini_client.Transcript(item, "high", ["English"])
 
     monkeypatch.setattr(gemini_client, "transcribe_audio", fake_transcribe)
     return script
@@ -307,3 +309,52 @@ def test_startup_failure_exits_cleanly_without_leaking_token(
     output = capsys.readouterr()
     assert token not in output.err + output.out
     assert "app.startup_failed" in output.err or "app.crashed" in output.err
+
+
+# --- sender, transcript confidence, readiness ---------------------------------------
+
+
+def test_sender_is_recorded() -> None:
+    signed = _post(message_id=1, text="a note with enough words", author_signature="Meera Pillai")
+    _handle(Update(update_id=1, channel_post=signed))
+    assert db.get_new_notes()[0].sender == "signature:Meera Pillai"
+    assert ingest.sender_of(_post(text="x", sender_chat=Chat(id=CAPTURE, type=Chat.CHANNEL))) == f"chat:{CAPTURE}"
+    assert ingest.sender_of(_post(text="x")) == "unknown"
+
+
+def test_handler_returns_id_only_when_ready_for_triage(transcriber: list) -> None:
+    ready = asyncio.run(ingest.handle_channel_post(
+        Update(update_id=1, channel_post=_post(message_id=1, text="text note")), SimpleNamespace(bot=FakeBot())))
+    assert ready == 1
+    transcriber.append(gemini_client.GeminiError("down"))
+    pending = asyncio.run(ingest.handle_channel_post(
+        Update(update_id=2, channel_post=_post(message_id=2, voice=_voice())), SimpleNamespace(bot=FakeBot())))
+    assert pending is None
+    sticker = asyncio.run(ingest.handle_channel_post(
+        Update(update_id=3, channel_post=_post(message_id=3, sticker=_sticker())), SimpleNamespace(bot=FakeBot())))
+    assert sticker is None
+
+
+def test_transcript_clarity_and_unclear_ratio_are_stored(transcriber: list) -> None:
+    transcriber.append(gemini_client.Transcript("the batch [unclear] came back [unclear] today", "medium", ["English"]))
+    _handle(Update(update_id=1, channel_post=_post(voice=_voice())), FakeBot())
+    note = db.get_new_notes()[0]
+    assert note.transcript_clarity == "medium"
+    assert note.unclear_ratio == round(2 / 7, 3)
+    assert ingest.is_low_confidence(note)  # 29% unclear > 20% limit
+
+
+@pytest.mark.parametrize(("clarity", "text", "low"), [
+    ("high", "a perfectly clear voice note about pH drift", False),
+    ("low", "a perfectly clear voice note about pH drift", True),
+    ("medium", "one [unclear] word in a longer clear voice note", False),
+])
+def test_low_confidence_rule(transcriber: list, clarity: str, text: str, low: bool) -> None:
+    transcriber.append(gemini_client.Transcript(text, clarity, ["English"]))
+    _handle(Update(update_id=1, channel_post=_post(voice=_voice())), FakeBot())
+    assert ingest.is_low_confidence(db.get_new_notes()[0]) is low
+
+
+def test_text_notes_are_never_low_confidence() -> None:
+    _handle(Update(update_id=1, channel_post=_post(text="[unclear] [unclear] typed by hand")))
+    assert not ingest.is_low_confidence(db.get_new_notes()[0])
