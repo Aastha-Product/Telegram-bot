@@ -377,3 +377,62 @@ def test_unintelligible_voice_note_is_shelved_and_meera_told(transcriber: list) 
 def test_transcript_unclear_ratio_property() -> None:
     assert gemini_client.Transcript("a [unclear] b [unclear]", "medium", []).unclear_ratio == 0.5
     assert gemini_client.Transcript("", "low", []).unclear_ratio == 1.0
+
+
+# --- voice messages sent straight to the bot chat ---------------------------------------------
+
+
+class PrivateVoice:
+    """Minimal stand-in for a private-chat Message carrying a voice note."""
+
+    def __init__(self, user_id: int = config.settings.meera_user_id,
+                 chat_id: int = config.settings.telegram_review_chat_id, message_id: int = 55) -> None:
+        self.message_id, self.date, self.text, self.caption = message_id, WHEN, None, None
+        self.voice = _voice()
+        self.from_user = SimpleNamespace(id=user_id)
+        self.chat = SimpleNamespace(id=chat_id)
+        self.author_signature, self.sender_chat = None, None
+        self.replies: list[str] = []
+
+    async def reply_text(self, text: str, parse_mode=None, reply_markup=None) -> None:
+        self.replies.append(text)
+
+
+def _private(message: PrivateVoice, bot: FakeBot) -> int | None:
+    return asyncio.run(ingest.handle_private_voice(SimpleNamespace(message=message, update_id=9),
+                                                   SimpleNamespace(bot=bot)))
+
+
+def test_meera_voice_in_bot_chat_becomes_a_note(transcriber: list) -> None:
+    transcriber.append("batch fourteen came back and the pH had drifted by about zero point four units")
+    message = PrivateVoice()
+    note_id = _private(message, FakeBot())
+    assert note_id is not None and message.replies == [ingest.ACK_VOICE]
+    note = db.get_note(note_id)
+    assert (note.content_type, note.status, note.sender) == ("voice", "new", f"user:{config.settings.meera_user_id}")
+    assert note.tg_chat_id == config.settings.telegram_review_chat_id
+    assert _private(PrivateVoice(), FakeBot()) is None  # the same message again is a no-op
+
+
+def test_voice_from_anyone_else_is_ignored(transcriber: list) -> None:
+    stranger = PrivateVoice(user_id=424242)
+    other_chat = PrivateVoice(chat_id=-100555)
+    assert _private(stranger, FakeBot()) is None and _private(other_chat, FakeBot()) is None
+    assert stranger.replies == [] and _all_notes() == [] and transcriber == []
+
+
+def test_app_routes_meera_voice_in_bot_chat_only() -> None:
+    from telegram import User
+
+    handler = next(h for h in app.build_application().handlers[0] if h.callback is app.on_private_voice)
+
+    def voice_update(user_id: int, chat_id: int) -> Update:
+        chat_type = Chat.PRIVATE if chat_id > 0 else Chat.GROUP
+        msg = Message(message_id=1, date=WHEN, chat=Chat(id=chat_id, type=chat_type), voice=_voice(),
+                      from_user=User(id=user_id, first_name="x", is_bot=False))
+        return Update(update_id=1, message=msg)
+
+    meera, review_chat = config.settings.meera_user_id, config.settings.telegram_review_chat_id
+    assert handler.check_update(voice_update(meera, review_chat))
+    assert not handler.check_update(voice_update(424242, review_chat))
+    assert not handler.check_update(voice_update(meera, -100777))

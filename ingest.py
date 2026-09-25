@@ -19,6 +19,7 @@ import db
 import gemini_client
 import review
 
+ACK_VOICE = "Got your voice note. Transcribing and scoring it now..."
 NOTICE_UNINTELLIGIBLE = ("I couldn't make out your latest voice note (it may be silent or too noisy), "
                          "so nothing was saved from it. Please re-record it or type it.")
 
@@ -34,7 +35,7 @@ class NoteInput:
 
 
 def extract_note(message: Message) -> NoteInput | None:
-    """Turn a channel post into what we store; None means ignore it (e.g. blank text)."""
+    """Turn a channel post or voice message into what we store; None means ignore it (e.g. blank text)."""
     if message.text is not None:
         text = message.text.strip()
         return NoteInput(text, "text", "new") if text else None
@@ -80,31 +81,54 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     if note is None:
         log.info("ingest.skipped message_id=%s reason=empty", post.message_id)
         return None
+    return await _store_and_prepare(context.bot, post, note)
+
+
+async def handle_private_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    """A voice message Meera sends straight to the bot chat is a note too.
+
+    Only voice is taken here: typed messages in this chat are her edit replies.
+    Never raises; returns the note id if it is ready for triage.
+    """
+    message = update.message
+    if message is None or message.voice is None:
+        return None
+    # The handler filter already restricts this, but authorisation is enforced here too.
+    if (message.from_user is None or message.from_user.id != config.settings.meera_user_id
+            or message.chat.id != config.settings.telegram_review_chat_id):
+        log.warning("ingest.rejected update_id=%s reason=not_meera_private_voice", update.update_id)
+        return None
+    await review.reply_safely(message, ACK_VOICE)
+    return await _store_and_prepare(context.bot, message, extract_note(message))
+
+
+async def _store_and_prepare(bot: Bot, message: Message, note: NoteInput) -> int | None:
+    """Store a note (idempotently) and transcribe it if it's voice; return its id once ready."""
     try:
         note_id = await asyncio.to_thread(
             db.add_note,
-            post.message_id,
-            post.chat.id,
+            message.message_id,
+            message.chat.id,
             note.content,
-            post.date,
+            message.date,
             note.content_type,
             note.tg_file_id,
             note.status,
-            sender_of(post),
+            sender_of(message),
         )
     except Exception:
-        log.exception("ingest.failed message_id=%s content_type=%s", post.message_id, note.content_type)
+        log.exception("ingest.failed message_id=%s content_type=%s", message.message_id, note.content_type)
         return None
     if note_id is None:
-        log.info("ingest.duplicate message_id=%s", post.message_id)
+        log.info("ingest.duplicate message_id=%s", message.message_id)
         return None
     log.info("ingest.stored note_id=%s message_id=%s content_type=%s status=%s chars=%d",
-             note_id, post.message_id, note.content_type, note.status, len(note.content))
+             note_id, message.message_id, note.content_type, note.status, len(note.content))
     if note.status == "new":
         return note_id
     if note.status == "pending_transcription":
         stored = await asyncio.to_thread(db.get_note, note_id)
-        if stored is not None and await transcribe_note(context.bot, stored):
+        if stored is not None and await transcribe_note(bot, stored):
             return note_id
     return None
 

@@ -132,6 +132,9 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("run", pipeline.handle_run_command, filters=meera_in_review_chat))
     application.add_handler(CallbackQueryHandler(review.handle_callback, pattern=review.CALLBACK_RE))
     application.add_handler(
+        MessageHandler(filters.UpdateType.MESSAGE & filters.VOICE & meera_in_review_chat, on_private_voice)
+    )
+    application.add_handler(
         MessageHandler(
             filters.UpdateType.MESSAGE & filters.TEXT & ~filters.COMMAND & meera_in_review_chat,
             review.handle_review_message,
@@ -145,6 +148,13 @@ def build_application() -> Application:
 async def on_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Capture the note, then process it immediately in the background (triage, scorecard, draft)."""
     note_id = await ingest.handle_channel_post(update, context)
+    if note_id is not None:
+        context.application.create_task(pipeline.process_note(context.bot, note_id), update=update)
+
+
+async def on_private_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Meera can also send voice notes straight to the bot chat; same flow as the channel."""
+    note_id = await ingest.handle_private_voice(update, context)
     if note_id is not None:
         context.application.create_task(pipeline.process_note(context.bot, note_id), update=update)
 

@@ -41,7 +41,7 @@ Required values: `TELEGRAM_BOT_TOKEN` (from @BotFather), `TELEGRAM_CHAT_ID` (cap
 ```
 
 In Telegram:
-- Post in the capture channel to add notes: text becomes `new`, voice is transcribed and becomes `new`, stickers and bare photos are stored as `unsupported`.
+- Add notes by posting in the capture channel, or by sending a voice message straight to the bot chat (Meera only). Text becomes `new`, voice is transcribed and becomes `new`, stickers and bare photos are stored as `unsupported`.
 - Each note gets a scorecard in the bot chat within seconds; qualifying notes also get a draft.
 - `/run` in the bot chat processes anything pending now (Meera only); `/start` confirms the bot is listening and delivers any waiting drafts.
 - Tap **Approve** to get copy-ready text, then **I've posted it** once it's live. Tap **Edit**, then reply with a full rewrite (kept verbatim) or a short instruction (one checked redraft). **Reject** shelves the note. **Regenerate** makes a fresh checked draft (up to `MAX_REGENERATIONS`).
