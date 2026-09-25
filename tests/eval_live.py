@@ -1,11 +1,11 @@
-"""Live evals against real Gemini/RSS (run by hand, not collected by pytest).
+"""Live evals against real Gemini / Google News (run by hand, not collected by pytest).
 
 Usage:
-    python tests/eval_live.py triage      # score the 5 sample notes
-    python tests/eval_live.py news        # real Google News fetch for sample keywords
-    python tests/eval_live.py draft [--save]  # triage + news + draft for the 5 sample notes;
-                                              # --save stores them as the prompt-regression baseline
-    python tests/eval_live.py probe [n]   # hallucination probe: n drafts of one note, no news
+    python tests/eval_live.py triage [keys...]     # 10-parameter scorecards for samples + test cases
+    python tests/eval_live.py draft [--save]       # triage, then news + draft + QA for qualifying notes
+    python tests/eval_live.py qa                   # TEST 9: inject a hallucination, confirm live QA catches it
+    python tests/eval_live.py probe [n]            # hallucination probe: n drafts of one note, no news
+    python tests/eval_live.py news                 # real Google News fetch for sample keywords
 """
 
 from __future__ import annotations
@@ -19,79 +19,92 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import config  # noqa: E402
 import db  # noqa: E402
 import draft  # noqa: E402
 import news  # noqa: E402
 import triage  # noqa: E402
 
-SAMPLES: dict[str, str] = json.loads(
-    (Path(__file__).parent / "fixtures" / "sample_notes.json").read_text(encoding="utf-8"))
+FIXTURES = Path(__file__).parent / "fixtures"
+SAMPLES: dict[str, str] = json.loads((FIXTURES / "sample_notes.json").read_text(encoding="utf-8"))
+CASES: dict[str, str] = json.loads((FIXTURES / "test_cases.json").read_text(encoding="utf-8"))
+BASELINE = FIXTURES / "last_good_drafts.json"
 
 
-def _load_samples() -> dict[str, db.Note]:
+def _load(notes: dict[str, str]) -> dict[str, db.Note]:
     db.init_db(Path(tempfile.mkdtemp()) / "eval.db")
     t0 = datetime.now(UTC)
     return {key: db.get_note(db.add_note(i + 1, -100, text, t0 + timedelta(minutes=i)))
-            for i, (key, text) in enumerate(SAMPLES.items())}
+            for i, (key, text) in enumerate(notes.items())}
 
 
-async def eval_triage() -> None:
-    notes = _load_samples()
-    results = {r.note_id: r for r in await triage.score_notes(list(notes.values()))}
-    for key, note in sorted(notes.items(), key=lambda kv: -results[kv[1].id].score):
-        r = results[note.id]
-        print(f"{r.score:4.1f}  eligible={r.is_eligible(config.settings.triage_threshold)!s:5}  "
-              f"{key:15} {r.category}  | news: {r.news_keywords}")
-        print(f"      reason: {r.reason}\n      angle:  {r.angle}")
-    best = triage.pick_best(list(results.values()), config.settings.triage_threshold)
-    print("pick_best ->", next(k for k, n in notes.items() if best and n.id == best.note_id))
-    batch, clean = results[notes["batch_14"].id], results[notes["clean_beauty"].id]
-    print("CHECK clean_beauty ranks below batch_14:", clean.score < batch.score)
+def _print_scorecard(key: str, r: triage.TriageResult) -> None:
+    print("=" * 96)
+    print(f"{key}: overall={r.overall} decision={r.decision.upper()} category={r.category}")
+    for p in r.parameters:
+        caps = f" CAPPED({'; '.join(p.caps)})" if p.caps else ""
+        print(f"   {p.name:21} raw={p.raw_score:4.1f} final={p.score:4.1f} x{p.weight} [{p.guardrail}]"
+              f" evidence={'verified' if p.evidence_verified else 'NOT FOUND'}{caps}")
+    for f in r.hard_flags:
+        print(f"   FLAG {f['type']} ({f['source']}): {f['detail'][:90]}")
 
 
-NEWS_QUERIES = [
-    "cosmetic raw material supplier formulation changes",
-    "cosmetic ingredient sourcing India supplier audit",
-    "skin barrier repair ceramide",
-    "skincare cosmetics India regulation",
-    "sunscreen SPF India",
-]
+async def eval_triage(keys: list[str]) -> None:
+    notes = _load({k: v for k, v in {**SAMPLES, **CASES}.items() if not keys or k in keys})
+    for key, note in notes.items():
+        r = await triage.assess_note(note)
+        if r is None:
+            print(f"{key}: INVALID ASSESSMENT")
+        else:
+            _print_scorecard(key, r)
 
 
-async def eval_news() -> None:
-    for query in NEWS_QUERIES:
-        raw = news.parse_items(await news._fetch(news.build_params(query)))
-        kept = await news.fetch_news(query)
-        print(f"[{query}] raw={len(raw)} kept={len(kept)}")
-        for item in kept:
-            print(f"   {item.published:%Y-%m-%d} {item.source}: {item.title[:90]}")
-
-
-BASELINE = Path(__file__).parent / "fixtures" / "last_good_drafts.json"
-
-
-async def eval_draft(save: bool = False) -> None:
-    notes = _load_samples()
+async def eval_draft(save: bool) -> None:
+    notes = _load(SAMPLES)
     baseline: dict[str, dict] = {}
     for key, note in notes.items():
-        verdict = await triage.score_note(note)
-        items = await news.fetch_news(verdict.news_keywords)
-        result = await draft.make_draft(note.content, verdict.category, verdict.angle,
-                                        draft.pick_exemplars(verdict.category), items)
-        print("=" * 100)
-        print(f"{key}: score={verdict.score} category={verdict.category} news_offered={len(items)}")
-        if result is None:
-            print("  -> DROPPED (failed validation twice)")
+        r = await triage.assess_note(note)
+        print("=" * 96)
+        print(f"{key}: overall={r.overall} decision={r.decision.upper()}")
+        if not r.qualified:
             continue
-        words = len(result.body.split())
-        print(f"  words={words} chars={len(result.body)} source={result.source_url}")
-        print("-" * 100)
+        items = await news.fetch_news(r.news_keywords)
+        result = await draft.make_draft(note.content, r.category, r.angle, draft.pick_exemplars(r.category), items,
+                                        core_idea=r.summary.get("core_idea", ""))
+        print(f"  news offered={len(items)} used={'yes' if result and result.news else 'no'}")
+        if result is None:
+            print("  -> DROPPED (failed code validation or fact check twice)")
+            continue
+        print(f"  words={len(result.body.split())} qa_passed={result.qa['passed']} "
+              f"voice_issues={result.qa['voice_issues']}")
+        if result.news:
+            print(f"  NEWS: {result.news['headline']} | {result.news['source']} | {result.news['date']}")
+            print(f"        relevance: {result.news['relevance']}")
+        print("-" * 96)
         print(result.body)
-        baseline[key] = {"score": verdict.score, "category": verdict.category, "body": result.body}
+        baseline[key] = {"overall": r.overall, "category": r.category, "body": result.body, "news": result.news}
     if save:
         BASELINE.write_text(json.dumps(baseline, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"saved {len(baseline)} drafts to {BASELINE}")
+
+
+async def eval_qa() -> None:
+    """TEST 9 live: a draft that passes every code check but contains an invented story."""
+    note = SAMPLES["batch_14"]
+    clean = json.loads(BASELINE.read_text(encoding="utf-8"))["batch_14"]["body"] if BASELINE.exists() else None
+    base = clean or ("Batch fourteen came back from the manufacturer and the pH stability data looked off. "
+                     "The supplier had quietly changed the preservative blend. The finished product pH dropped by "
+                     "about 0.4 units, enough to push us out of the optimal range for our emollient blend.")
+    injected = base + ("\n\nWhen I told our head of quality, she said three other brands she knows had exactly "
+                       "the same thing happen with that supplier, and one of them had to recall a product.")
+    code = draft.validate(injected, "", {"invented_stats": False, "on_voice": True}, note, [])
+    problems, qa = await draft.fact_check(injected, draft.sources_text(note, None))
+    print("code validators:", code or "passed (cannot see the invented story)")
+    print("live QA blocking findings:")
+    for c in qa["blocking"]:
+        print("  -", c["claim"][:110], "|", c["why"][:90])
+    print("CAUGHT BY QA:", bool(problems))
+    clean_problems, _ = await draft.fact_check(base, draft.sources_text(note, None))
+    print("clean baseline passes QA:", not clean_problems, clean_problems[:2])
 
 
 async def eval_probe(runs: int) -> None:
@@ -105,15 +118,29 @@ async def eval_probe(runs: int) -> None:
         else:
             passed += 1
             assert not draft.unsupported_numbers(result.body, note)
-        print(f"run {n + 1}: {'dropped' if result is None else 'passed validation'}")
-    print(f"probe: {passed} passed, {dropped} dropped, 0 invented facts reached output")
+        print(f"run {n + 1}: {'dropped' if result is None else 'passed code checks + QA'}")
+    print(f"probe: {passed} passed, {dropped} dropped")
+
+
+async def eval_news() -> None:
+    for query in ["cosmetic preservative supplier", "skin barrier repair ceramide", "sunscreen SPF India",
+                  "skincare cosmetics India regulation"]:
+        kept = await news.fetch_news(query)
+        print(f"[{query}] credible+relevant={len(kept)}")
+        for item in kept:
+            print(f"   {item.published:%Y-%m-%d} {item.source}: {item.title[:90]}")
 
 
 if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else "triage"
-    if command == "probe":
-        asyncio.run(eval_probe(int(sys.argv[2]) if len(sys.argv) > 2 else 5))
+    args = sys.argv[2:]
+    if command == "triage":
+        asyncio.run(eval_triage(args))
     elif command == "draft":
-        asyncio.run(eval_draft(save="--save" in sys.argv))
+        asyncio.run(eval_draft("--save" in args))
+    elif command == "qa":
+        asyncio.run(eval_qa())
+    elif command == "probe":
+        asyncio.run(eval_probe(int(args[0]) if args else 5))
     else:
-        asyncio.run({"triage": eval_triage, "news": eval_news}[command]())
+        asyncio.run(eval_news())

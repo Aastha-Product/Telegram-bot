@@ -13,6 +13,7 @@ import config
 import db
 import gemini_client
 import ingest
+import triage
 
 CAPTURE = config.settings.telegram_chat_id
 OTHER = -1009999999999
@@ -51,6 +52,10 @@ class FakeBot:
 
     async def send_chat_action(self, chat_id: int, action: str) -> bool:
         return True
+
+    async def send_message(self, **kwargs) -> SimpleNamespace:
+        self.messages = getattr(self, "messages", []) + [kwargs["text"]]
+        return SimpleNamespace(message_id=1)
 
     async def get_file(self, file_id: str) -> SimpleNamespace:
         self.requested.append(file_id)
@@ -232,7 +237,7 @@ def test_logs_do_not_contain_note_text(caplog: pytest.LogCaptureFixture) -> None
 
 
 def _handler():
-    return next(h for h in app.build_application().handlers[0] if h.callback is ingest.handle_channel_post)
+    return next(h for h in app.build_application().handlers[0] if h.callback is app.on_channel_post)
 
 
 def test_app_retries_pending_transcriptions_on_startup(transcriber: list) -> None:
@@ -341,7 +346,7 @@ def test_transcript_clarity_and_unclear_ratio_are_stored(transcriber: list) -> N
     note = db.get_new_notes()[0]
     assert note.transcript_clarity == "medium"
     assert note.unclear_ratio == round(2 / 7, 3)
-    assert ingest.is_low_confidence(note)  # 29% unclear > 20% limit
+    assert triage.is_low_confidence(note)  # 29% unclear > 20% limit
 
 
 @pytest.mark.parametrize(("clarity", "text", "low"), [
@@ -352,9 +357,23 @@ def test_transcript_clarity_and_unclear_ratio_are_stored(transcriber: list) -> N
 def test_low_confidence_rule(transcriber: list, clarity: str, text: str, low: bool) -> None:
     transcriber.append(gemini_client.Transcript(text, clarity, ["English"]))
     _handle(Update(update_id=1, channel_post=_post(voice=_voice())), FakeBot())
-    assert ingest.is_low_confidence(db.get_new_notes()[0]) is low
+    assert triage.is_low_confidence(db.get_new_notes()[0]) is low
 
 
 def test_text_notes_are_never_low_confidence() -> None:
     _handle(Update(update_id=1, channel_post=_post(text="[unclear] [unclear] typed by hand")))
-    assert not ingest.is_low_confidence(db.get_new_notes()[0])
+    assert not triage.is_low_confidence(db.get_new_notes()[0])
+
+
+def test_unintelligible_voice_note_is_shelved_and_meera_told(transcriber: list) -> None:
+    transcriber.append(gemini_client.EmptyTranscript("transcription came back empty"))
+    bot = FakeBot()
+    _handle(Update(update_id=1, channel_post=_post(voice=_voice())), bot)
+    [note] = _all_notes()
+    assert note.status == "shelved" and db.get_pending_transcriptions() == []
+    assert bot.messages == [ingest.NOTICE_UNINTELLIGIBLE]
+
+
+def test_transcript_unclear_ratio_property() -> None:
+    assert gemini_client.Transcript("a [unclear] b [unclear]", "medium", []).unclear_ratio == 0.5
+    assert gemini_client.Transcript("", "low", []).unclear_ratio == 1.0

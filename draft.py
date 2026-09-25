@@ -16,6 +16,7 @@ from typing import Any
 
 import config
 import gemini_client
+import news as news_source
 from news import NewsItem
 
 log = logging.getLogger(__name__)
@@ -40,6 +41,8 @@ class DraftResult:
     source_url: str | None
     exemplar_ids: list[int]
     model: str
+    news: dict[str, str] | None = None  # headline/source/date/url/relevance of the cited hook
+    qa: dict[str, Any] | None = None  # the second-pass fact check that this draft passed
 
 
 # --- corpus ----------------------------------------------------------------------
@@ -260,23 +263,45 @@ def draft_schema() -> dict[str, Any]:
         "properties": {
             "body": {"type": "string"},
             "used_source_url": {"type": "string"},
+            "news_relevance": {"type": "string"},
             "self_check": {
                 "type": "object",
                 "properties": {"invented_stats": {"type": "boolean"}, "on_voice": {"type": "boolean"}},
                 "required": ["invented_stats", "on_voice"],
             },
         },
-        "required": ["body", "used_source_url", "self_check"],
+        "required": ["body", "used_source_url", "news_relevance", "self_check"],
+    }
+
+
+def qa_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "findings": {
+                "type": "array",
+                "items": {"type": "object",
+                          "properties": {"claim": {"type": "string"},
+                                         "severity": {"type": "string", "enum": ["blocking", "minor"]},
+                                         "why": {"type": "string"}},
+                          "required": ["claim", "severity", "why"]},
+            },
+            "changes_meera_idea": {"type": "boolean"},
+            "idea_note": {"type": "string"},
+            "voice_issues": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["findings", "changes_meera_idea", "idea_note", "voice_issues"],
     }
 
 
 def build_prompt(note_text: str, category: str | None, angle: str, exemplars: list[CorpusPiece],
-                 news: list[NewsItem], feedback: str = "") -> str:
+                 news: list[NewsItem], feedback: str = "", core_idea: str = "") -> str:
     return gemini_client.render(
         gemini_client.load_prompt("draft"),
         voice_skill=gemini_client.load_prompt("voice_skill"),
         category=category or "any",
         angle=angle or "Develop the note's own point.",
+        core_idea=core_idea or angle or "the point Meera makes in her note",
         exemplars="\n\n".join(format_exemplar(p) for p in exemplars),
         note=note_text,
         news=format_news(news),
@@ -289,19 +314,79 @@ def _feedback(problems: list[str]) -> str:
     return f"\n# Your previous draft was rejected\nFix every one of these problems:\n{listed}\n"
 
 
-async def _attempt(prompt: str, source_text: str, news: list[NewsItem]) -> tuple[str, str, list[str]]:
+def sources_text(note_text: str, cited: NewsItem | None) -> str:
+    text = f"MEERA'S NOTE:\n{note_text}"
+    if cited is not None:
+        text += f"\n\nCITED HEADLINE ({cited.source}): {cited.title}"
+    return text
+
+
+async def fact_check(body: str, sources: str) -> tuple[list[str], dict[str, Any]]:
+    """Second-pass QA by a model. Blocking findings or a changed idea become problems; minor ones are recorded.
+
+    Anything the model doesn't clearly mark "minor" is treated as blocking (fail closed).
+    """
+    data = await gemini_client.generate_json(
+        gemini_client.render(gemini_client.load_prompt("qa"), sources=sources, draft=body),
+        qa_schema(), config.settings.qa_model,
+    )
+    findings = [f for f in data.get("findings") or [] if isinstance(f, dict) and f.get("claim")]
+    blocking = [f for f in findings if f.get("severity") != "minor"]
+    minor = [f for f in findings if f.get("severity") == "minor"]
+    problems = [f"states something not in the note or source: '{f['claim']}' ({f.get('why', '')})" for f in blocking]
+    if data.get("changes_meera_idea") is True:
+        problems.append(f"changes Meera's idea: {data.get('idea_note', '')}")
+    qa = {"passed": not problems, "blocking": blocking, "minor": minor,
+          "changes_meera_idea": bool(data.get("changes_meera_idea")),
+          "idea_note": str(data.get("idea_note", "")), "voice_issues": list(data.get("voice_issues") or [])}
+    return problems, qa
+
+
+async def _attempt(prompt: str, note_text: str, news: list[NewsItem]
+                   ) -> tuple[str, NewsItem | None, str, list[str], dict[str, Any] | None]:
+    """One draft: code validators first (cheap, certain), then the model fact check only if those pass."""
     data = await gemini_client.generate_json(prompt, draft_schema(), config.settings.draft_model)
     body = normalise(str(data.get("body", "")))
     used = str(data.get("used_source_url") or "").strip()
+    relevance = str(data.get("news_relevance") or "").strip()
     self_check = data.get("self_check") if isinstance(data.get("self_check"), dict) else {}
-    return body, used, validate(body, used, self_check, source_text, news)
+    problems = validate(body, used, self_check, note_text, news)
+    cited = next((i for i in news if i.url == used), None) if used else None
+    if cited is not None and not relevance:
+        problems.append("a cited news item needs news_relevance explaining how it connects to Meera's idea")
+    if problems:
+        return body, cited, relevance, problems, None
+    qa_problems, qa = await fact_check(body, sources_text(note_text, cited))
+    return body, cited, relevance, qa_problems, qa
 
 
-async def revise_draft(note_text: str, previous_body: str, instruction: str) -> str | None:
-    """Redraft once from Meera's one-line instruction, under the same validators; None if it fails.
+async def make_draft(note_text: str, category: str | None, angle: str, exemplars: list[CorpusPiece],
+                     news: list[NewsItem] | None = None, core_idea: str = "") -> DraftResult | None:
+    """Draft, validate, fact-check; redraft once on any problem; None if it still fails (fail closed).
 
-    Facts may come from the note or the previous draft (which already passed validation).
-    Raises GeminiError if the model is unreachable.
+    Raises GeminiError if the model is unreachable, so callers can tell 'AI down' from 'draft rejected'.
+    """
+    news = news or []
+    prompt = build_prompt(note_text, category, angle, exemplars, news, core_idea=core_idea)
+    body, cited, relevance, problems, qa = await _attempt(prompt, note_text, news)
+    if problems:
+        log.warning("draft.rejected attempt=1 problems=%s", problems)
+        prompt = build_prompt(note_text, category, angle, exemplars, news, _feedback(problems), core_idea)
+        body, cited, relevance, problems, qa = await _attempt(prompt, note_text, news)
+    if problems:
+        log.warning("draft.rejected attempt=2 problems=%s action=drop", problems)
+        return None
+    return DraftResult(
+        body=body, source_url=cited.url if cited else None, exemplar_ids=[p.id for p in exemplars],
+        model=config.settings.draft_model, news=news_source.to_record(cited, relevance) if cited else None, qa=qa,
+    )
+
+
+async def revise_draft(note_text: str, previous_body: str, instruction: str) -> tuple[str, dict[str, Any]] | None:
+    """Redraft once from Meera's one-line instruction under the same validators and fact check.
+
+    Facts may come from the note or the previous draft (which already passed both checks).
+    Returns (body, qa) or None if it fails. Raises GeminiError if the model is unreachable.
     """
     def prompt(feedback: str = "") -> str:
         return gemini_client.render(
@@ -311,31 +396,21 @@ async def revise_draft(note_text: str, previous_body: str, instruction: str) -> 
         )
 
     sources = note_text + "\n" + previous_body
-    body, _, problems = await _attempt(prompt(), sources, [])
+    body, _, _, problems, qa = await _attempt(prompt(), sources, [])
     if problems:
         log.warning("draft.revision_rejected attempt=1 problems=%s", problems)
-        body, _, problems = await _attempt(prompt(_feedback(problems)), sources, [])
+        body, _, _, problems, qa = await _attempt(prompt(_feedback(problems)), sources, [])
     if problems:
         log.warning("draft.revision_rejected attempt=2 problems=%s action=drop", problems)
         return None
-    return body
+    return body, qa
 
 
-async def make_draft(note_text: str, category: str | None, angle: str, exemplars: list[CorpusPiece],
-                     news: list[NewsItem] | None = None) -> DraftResult | None:
-    """Draft, validate, redraft once on failure; None if it still fails (never send what can't be validated).
+async def draft_note(note_text: str, category: str | None, angle: str, core_idea: str,
+                     news_keywords: str) -> DraftResult | None:
+    """The full drafting step for a qualified note: optional news hook, then draft + both QA layers.
 
-    Raises GeminiError if the model is unreachable, so callers can tell 'AI down' from 'draft rejected'.
+    News never blocks drafting: fetch_news returns [] on any failure or when nothing credible fits.
     """
-    news = news or []
-    prompt = build_prompt(note_text, category, angle, exemplars, news)
-    body, used, problems = await _attempt(prompt, note_text, news)
-    if problems:
-        log.warning("draft.rejected attempt=1 problems=%s", problems)
-        prompt = build_prompt(note_text, category, angle, exemplars, news, _feedback(problems))
-        body, used, problems = await _attempt(prompt, note_text, news)
-    if problems:
-        log.warning("draft.rejected attempt=2 problems=%s action=drop", problems)
-        return None
-    return DraftResult(body=body, source_url=used or None, exemplar_ids=[p.id for p in exemplars],
-                       model=config.settings.draft_model)
+    items = await news_source.fetch_news(news_keywords)
+    return await make_draft(note_text, category, angle, pick_exemplars(category), items, core_idea=core_idea)

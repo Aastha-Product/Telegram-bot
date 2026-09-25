@@ -10,7 +10,6 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import time
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -29,10 +28,8 @@ DEFAULTS: dict[str, str] = {
     "DRAFT_MODEL": "gemini-3.5-flash",
     "TRANSCRIBE_MODEL": "gemini-3.5-flash",
     "DB_PATH": "skinstinct.db",
-    "SCHEDULE_DAYS": "mon,wed,fri",
-    "SCHEDULE_TIME": "07:30",
     "TIMEZONE": "Asia/Kolkata",
-    "TRIAGE_THRESHOLD": "6",
+    "TRIAGE_THRESHOLD": "8",
     "TRIAGE_MIN_WORDS": "12",
     "NEWS_MAX_AGE_DAYS": "14",
     "NEWS_MAX_ITEMS": "2",
@@ -47,9 +44,6 @@ DEFAULTS: dict[str, str] = {
 
 # Telegram's secret_token allows 1-256 of these characters; we also require some length.
 WEBHOOK_SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{16,256}$")
-
-VALID_DAYS: tuple[str, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-
 
 class ConfigError(Exception):
     """Raised when required settings are missing or invalid."""
@@ -66,8 +60,6 @@ class Settings:
     draft_model: str
     transcribe_model: str
     db_path: Path
-    schedule_days: tuple[str, ...]
-    schedule_time: time
     timezone: ZoneInfo
     triage_threshold: float
     triage_min_words: int
@@ -99,8 +91,6 @@ class Settings:
             f"draft_model={self.draft_model!r}, "
             f"transcribe_model={self.transcribe_model!r}, "
             f"db_path={str(self.db_path)!r}, "
-            f"schedule_days={self.schedule_days}, "
-            f"schedule_time={self.schedule_time.strftime('%H:%M')}, "
             f"timezone={self.timezone.key!r}, "
             f"triage_threshold={self.triage_threshold}, "
             f"triage_min_words={self.triage_min_words}, "
@@ -138,22 +128,6 @@ def _parse_float(name: str, raw: str, errors: list[str]) -> float:
         return 0.0
 
 
-def _parse_days(raw: str, errors: list[str]) -> tuple[str, ...]:
-    days = tuple(d.strip().lower() for d in raw.split(",") if d.strip())
-    bad = [d for d in days if d not in VALID_DAYS]
-    if not days or bad:
-        errors.append(f"SCHEDULE_DAYS must be comma-separated from {', '.join(VALID_DAYS)}")
-    return days
-
-
-def _parse_time(raw: str, errors: list[str]) -> time:
-    try:
-        return time.fromisoformat(raw)
-    except ValueError:
-        errors.append("SCHEDULE_TIME must be HH:MM")
-        return time(0, 0)
-
-
 def _parse_zone(raw: str, errors: list[str]) -> ZoneInfo:
     try:
         return ZoneInfo(raw)
@@ -187,7 +161,7 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         errors.append("MEERA_USER_ID must be a positive Telegram user id")
 
     threshold = _parse_float("TRIAGE_THRESHOLD", get("TRIAGE_THRESHOLD"), errors)
-    # Triage scores notes 0-10 (Components Map answer key).
+    # Overall publishability is 0-10; a note must score strictly ABOVE this to be drafted.
     if not 0.0 <= threshold <= 10.0:
         errors.append("TRIAGE_THRESHOLD must be between 0 and 10")
 
@@ -235,8 +209,6 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         draft_model=get("DRAFT_MODEL"),
         transcribe_model=get("TRANSCRIBE_MODEL"),
         db_path=Path(get("DB_PATH")),
-        schedule_days=_parse_days(get("SCHEDULE_DAYS"), errors),
-        schedule_time=_parse_time(get("SCHEDULE_TIME"), errors),
         timezone=_parse_zone(get("TIMEZONE"), errors),
         triage_threshold=threshold,
         triage_min_words=min_words,

@@ -1,4 +1,3 @@
-from datetime import time
 from pathlib import Path
 
 import pytest
@@ -22,19 +21,19 @@ def test_loads_required_and_defaults() -> None:
     assert s.draft_model == "gemini-3.5-flash"
     assert s.transcribe_model == "gemini-3.5-flash"
     assert s.db_path == Path("skinstinct.db")
-    assert s.schedule_days == ("mon", "wed", "fri")
-    assert s.schedule_time == time(7, 30)
+    assert s.sweep_interval_minutes == 60 and s.max_regenerations == 3
+    assert s.qa_model == "gemini-3.5-flash" and s.transcript_max_unclear_ratio == 0.2
     assert s.timezone.key == "Asia/Kolkata"
-    assert s.triage_threshold == 6.0
+    assert s.triage_threshold == 8.0
     assert s.triage_min_words == 12
     assert (s.draft_min_chars, s.draft_max_chars) == (200, 3000)
     assert (s.news_max_age_days, s.news_max_items) == (14, 2)
 
 
 def test_overrides_are_applied() -> None:
-    s = load_settings({**VALID_ENV, "DRAFT_MODEL": "gemini-3.8-flash", "SCHEDULE_DAYS": "Tue, Thu"})
+    s = load_settings({**VALID_ENV, "DRAFT_MODEL": "gemini-3.8-flash", "SWEEP_INTERVAL_MINUTES": "15"})
     assert s.draft_model == "gemini-3.8-flash"
-    assert s.schedule_days == ("tue", "thu")
+    assert s.sweep_interval_minutes == 15
 
 
 @pytest.mark.parametrize("name", REQUIRED_VARS)
@@ -68,8 +67,9 @@ def test_capture_chat_id_must_be_channel_id() -> None:
         ("TRIAGE_THRESHOLD", "11"),
         ("TRIAGE_THRESHOLD", "-1"),
         ("TRIAGE_MIN_WORDS", "0"),
-        ("SCHEDULE_DAYS", "monday"),
-        ("SCHEDULE_TIME", "7.30am"),
+        ("SWEEP_INTERVAL_MINUTES", "1"),
+        ("TRANSCRIPT_MAX_UNCLEAR_RATIO", "1.5"),
+        ("MAX_REGENERATIONS", "-1"),
         ("TIMEZONE", "Mars/Olympus"),
         ("DRAFT_MIN_CHARS", "5000"),
         ("NEWS_MAX_ITEMS", "0"),

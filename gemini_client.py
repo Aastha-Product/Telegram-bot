@@ -37,6 +37,10 @@ class GeminiError(Exception):
     """A model call failed for good (after retries/repair). Message never contains the API key."""
 
 
+class EmptyTranscript(GeminiError):
+    """The audio was processed but contained no intelligible speech (silence, noise). Retrying won't help."""
+
+
 CLARITY_LEVELS: tuple[str, ...] = ("high", "medium", "low")
 TRANSCRIPT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -54,6 +58,12 @@ class Transcript:
     text: str
     clarity: str  # the model's own estimate; Gemini reports no numeric confidence
     languages: list[str]
+
+    @property
+    def unclear_ratio(self) -> float:
+        """Share of words the transcriber marked [unclear]."""
+        words = len(self.text.split())
+        return round(self.text.count("[unclear]") / words, 3) if words else 1.0
 
 
 def load_prompt(name: str) -> str:
@@ -168,7 +178,7 @@ async def transcribe_audio(audio: bytes, mime_type: str, model: str) -> Transcri
                                attachments=[types.Part.from_bytes(data=audio, mime_type=mime_type)])
     text = str(data["transcript"]).strip()
     if not text:
-        raise GeminiError("transcription came back empty")
+        raise EmptyTranscript("transcription came back empty")
     clarity = data["clarity"] if data["clarity"] in CLARITY_LEVELS else "low"  # unknown means untrusted
     languages = [str(x) for x in data["languages"]] if isinstance(data["languages"], list) else []
     return Transcript(text=text, clarity=clarity, languages=languages)

@@ -28,6 +28,21 @@ FALLBACK_WORDS = 3
 # Too generic to count as a topical match on their own.
 GENERIC_WORDS = frozenset({"india", "indian", "news", "latest", "update", "brand", "brands", "market"})
 
+# Publishers whose headlines may be cited. Google News aggregates everything (press releases,
+# content farms); a hook must come from a recognisable newsroom or trade title.
+CREDIBLE_SOURCES = frozenset({
+    "the hindu", "hindu businessline", "businessline", "mint", "livemint", "mint lounge",
+    "the economic times", "economic times", "etretail", "et healthworld", "business standard",
+    "hindustan times", "the indian express", "indian express", "the times of india", "times of india",
+    "financial express", "moneycontrol", "business today", "cnbc tv18", "cnbctv18", "ndtv", "ndtv profit",
+    "deccan herald", "the print", "theprint", "scroll", "scroll.in", "the news minute", "forbes india",
+    "fortune india", "outlook business", "yourstory", "inc42", "entrackr", "reuters", "bbc", "bbc news",
+    "the guardian", "financial times", "bloomberg", "vogue india", "vogue business", "business of fashion",
+    "the business of fashion", "elle india", "harper's bazaar india", "femina", "cosmetics business",
+    "cosmeticsdesign-asia.com", "cosmetics design asia", "cosmeticsdesign.com", "personal care insights",
+    "premium beauty news", "happi", "global cosmetic industry",
+})
+
 # Tests swap this for an httpx.MockTransport.
 _transport: httpx.AsyncBaseTransport | None = None
 
@@ -61,6 +76,21 @@ def is_relevant(item: NewsItem, keywords: str) -> bool:
     title = item.title.lower()
     hits = sum(1 for w in words if w in title)
     return hits >= min(2, len(words))
+
+
+def is_credible(item: NewsItem) -> bool:
+    return item.source.strip().lower() in CREDIBLE_SOURCES
+
+
+def to_record(item: NewsItem, relevance: str) -> dict[str, str]:
+    """What gets stored and shown to Meera for a cited news hook."""
+    return {
+        "headline": item.title,
+        "source": item.source,
+        "date": item.published.strftime("%d %b %Y") if item.published else "unknown",
+        "url": item.url,
+        "relevance": relevance,
+    }
 
 
 def is_recent(item: NewsItem, now: datetime) -> bool:
@@ -115,11 +145,11 @@ async def _fetch(params: dict[str, str]) -> bytes:
 
 async def _search(keywords: str, now: datetime) -> tuple[int, list[NewsItem]]:
     items = parse_items(await _fetch(build_params(keywords)))
-    return len(items), [i for i in items if is_recent(i, now) and is_relevant(i, keywords)]
+    return len(items), [i for i in items if is_recent(i, now) and is_credible(i) and is_relevant(i, keywords)]
 
 
 async def fetch_news(keywords: str, now: datetime | None = None) -> list[NewsItem]:
-    """Recent, relevant headlines for these keywords; [] on any failure or if nothing fits."""
+    """Recent, credible, relevant headlines for these keywords; [] on any failure or if nothing fits."""
     keywords = keywords.strip()
     words = significant_words(keywords)
     if not words:

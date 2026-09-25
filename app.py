@@ -35,11 +35,10 @@ log = logging.getLogger(__name__)
 WEBHOOK_SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 MAX_WEBHOOK_BODY_BYTES = 1_000_000
 
-REQUIRED_PROMPTS: tuple[str, ...] = ("triage", "draft", "revise", "repair", "transcribe", "voice_skill")
+REQUIRED_PROMPTS: tuple[str, ...] = ("triage", "draft", "revise", "repair", "transcribe", "voice_skill", "qa")
 
 ALLOWED_UPDATES: list[str] = [Update.CHANNEL_POST, Update.MESSAGE, Update.CALLBACK_QUERY]
-# PTB's run_daily numbers days from Sunday = 0.
-PTB_DAYS: dict[str, int] = {"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
+FIRST_SWEEP_SECONDS = 60
 
 
 class RedactSecrets(logging.Filter):
@@ -122,7 +121,7 @@ def build_application() -> Application:
     application.add_handler(
         MessageHandler(
             filters.UpdateType.CHANNEL_POST & filters.Chat(chat_id=settings.telegram_chat_id),
-            ingest.handle_channel_post,
+            on_channel_post,
         )
     )
     # Filters narrow what reaches the handlers; each handler re-checks Meera's id in code.
@@ -138,20 +137,26 @@ def build_application() -> Application:
         )
     )
     application.add_error_handler(on_error)
-    schedule_drafts(application)
+    schedule_sweep(application)
     return application
 
 
-def schedule_drafts(application: Application) -> None:
-    """Register the Mon/Wed/Fri (by default) draft job in the configured timezone."""
-    settings = config.settings
+async def on_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Capture the note, then process it immediately in the background (triage, scorecard, draft)."""
+    note_id = await ingest.handle_channel_post(update, context)
+    if note_id is not None:
+        context.application.create_task(pipeline.process_note(context.bot, note_id), update=update)
+
+
+def schedule_sweep(application: Application) -> None:
+    """A periodic retry of anything that failed (Gemini or Telegram down, transcription pending)."""
     if application.job_queue is None:
         raise RuntimeError("JobQueue unavailable: install python-telegram-bot[job-queue]")
-    application.job_queue.run_daily(
-        pipeline.scheduled_job,
-        time=settings.schedule_time.replace(tzinfo=settings.timezone),
-        days=tuple(PTB_DAYS[d] for d in settings.schedule_days),
-        name="draft-pipeline",
+    application.job_queue.run_repeating(
+        pipeline.sweep_job,
+        interval=config.settings.sweep_interval_minutes * 60,
+        first=FIRST_SWEEP_SECONDS,
+        name="retry-sweep",
     )
 
 

@@ -1,22 +1,24 @@
 # Skinstinct Content Engine
 
-A note-to-draft assistant for Meera Pillai (founder, Skinstinct). She drops raw notes (voice or text) into a private Telegram channel; three times a week the bot picks the best one, drafts a LinkedIn post in her voice, and sends it to her in Telegram with **Approve / Edit / Discard**. She posts to LinkedIn herself. **This system never publishes anything, anywhere.**
+A note-to-draft assistant for Meera Pillai (founder, Skinstinct). She drops a voice note (or text) into a private Telegram channel. The bot transcribes it, scores its publishability against a 10-parameter rubric, and sends her a scorecard. If the note scores **strictly above 8.0** and passes every guardrail, it drafts a LinkedIn post in her voice, with a credible news hook only if one genuinely fits, fact-checks the draft twice, and sends it for **Approve / Edit / Reject / Regenerate**. She posts to LinkedIn herself. **This system never publishes anything, anywhere.**
 
-See `PLAN.md` for the design and `CLAUDE.md` for working rules.
+See `PLAN.md` for the design, `docs/publishability_rubric.md` for the scoring rubric (with sources), and `CLAUDE.md` for working rules.
 
 ## How it works (Components Map)
 
 | Actor | Step | Module |
 |---|---|---|
-| Meera | Drops a voice note or text into the capture channel | - |
-| Telegram | Receives it; voice is transcribed to text with Gemini | `ingest.py` |
-| Gemini (triage) | Scores each note 0-10; code rejects anything below 6 | `triage.py` |
-| Google News | Fetches a recent, relevant India news hook (optional) | `news.py` |
-| Gemini (AI) | Drafts in Meera's voice using `prompts/voice_skill.md` + corpus examples | `draft.py` |
-| Code | Validates every draft: no invented numbers, studies, timing or sources; no emoji, hashtags, links or CTAs | `draft.py` |
-| Review gate | Meera approves, edits or discards in Telegram, then posts it herself | `review.py` |
+| Meera | Drops a voice note into the capture channel | - |
+| Telegram | Receives it; Gemini transcribes it verbatim and reports clarity. Silent or noisy audio: Meera is asked to re-record | `ingest.py` |
+| Gemini (triage) | Scores 10 parameters, each with verbatim evidence, a gap and a guardrail status; flags hard guardrail issues | `triage.py` |
+| Code | Verifies evidence against the transcript, applies guardrail caps, computes the weighted score, detects personal data, decides: **> 8.0 and no flags = draft** | `triage.py` |
+| Telegram | Scorecard to Meera for every note: rejected (with what would make it stronger), human review (with the flags), or qualified | `review.py` |
+| Google News | A recent, relevant hook from an allowlisted credible publisher, or none | `news.py` |
+| Gemini (AI) | Drafts in her voice (`prompts/voice_skill.md` + corpus examples), preserving her core idea | `draft.py` |
+| QA | Code validators (invented numbers, studies or timing; emoji, hashtags, links, CTAs), then a model fact check for anything the note doesn't support. One redraft, then drop | `draft.py` |
+| Review gate | Approve (copy-ready text + "I've posted it"), Edit (verbatim rewrite or one-line instruction), Reject, Regenerate | `review.py` |
 
-`pipeline.py` runs the chain on a schedule (Mon/Wed/Fri 07:30 IST by default), one draft per slot. `db.py` (SQLite) and `gemini_client.py` are the only storage and model boundaries.
+Notes are processed **the moment they arrive** (`pipeline.process_note`). A sweep every `SWEEP_INTERVAL_MINUTES` retries anything that failed, for example while Gemini or Telegram was down. Every assessment, draft revision, and approved final text (kept separately from the AI draft) is stored in SQLite for audit.
 
 ## Local setup
 
@@ -39,8 +41,9 @@ Required values: `TELEGRAM_BOT_TOKEN` (from @BotFather), `TELEGRAM_CHAT_ID` (cap
 
 In Telegram:
 - Post in the capture channel to add notes: text becomes `new`, voice is transcribed and becomes `new`, stickers and bare photos are stored as `unsupported`.
-- In the bot chat, `/run` drafts one post now (Meera only), and `/start` confirms the bot is listening.
-- Tap **Approve** to get copy-ready text. Tap **Edit**, then reply with a full rewrite (kept verbatim) or a short instruction (one validated redraft). **Discard** shelves the note.
+- Each note gets a scorecard in the bot chat within seconds; qualifying notes also get a draft.
+- `/run` in the bot chat processes anything pending now (Meera only); `/start` confirms the bot is listening and delivers any waiting drafts.
+- Tap **Approve** to get copy-ready text, then **I've posted it** once it's live. Tap **Edit**, then reply with a full rewrite (kept verbatim) or a short instruction (one checked redraft). **Reject** shelves the note. **Regenerate** makes a fresh checked draft (up to `MAX_REGENERATIONS`).
 
 Stop with Ctrl+C.
 
@@ -54,10 +57,11 @@ All external services are mocked. Live checks against real Gemini, Google News a
 
 ```bash
 .venv/Scripts/python smoke_gemini.py [audio_file]      # one JSON call (+ optional transcription)
-.venv/Scripts/python tests/eval_live.py triage         # score the 5 sample notes
-.venv/Scripts/python tests/eval_live.py news           # real Google News fetch
-.venv/Scripts/python tests/eval_live.py draft          # draft all 5 samples; add --save to update the baseline
+.venv/Scripts/python tests/eval_live.py triage         # 10-parameter scorecards: 5 samples + test cases
+.venv/Scripts/python tests/eval_live.py draft          # news + draft + QA for qualifying samples; --save updates the baseline
+.venv/Scripts/python tests/eval_live.py qa             # TEST 9: injected hallucination must be caught by QA
 .venv/Scripts/python tests/eval_live.py probe 10       # hallucination probe
+.venv/Scripts/python tests/eval_live.py news           # real Google News fetch (credible + relevant only)
 ```
 
 When you change `prompts/draft.md` or `prompts/voice_skill.md`, re-run `eval_live.py draft` and compare against `tests/fixtures/last_good_drafts.json` before shipping.

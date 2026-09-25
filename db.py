@@ -399,19 +399,6 @@ def _row_to_note(row: sqlite3.Row) -> Note:
     )
 
 
-def get_unassessed_notes() -> list[Note]:
-    """Notes ready for triage that have never been assessed (e.g. Gemini was down), oldest first."""
-    with _connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT * FROM notes n
-            WHERE n.status = 'new' AND NOT EXISTS (SELECT 1 FROM assessments a WHERE a.note_id = n.id)
-            ORDER BY n.created_at, n.id
-            """
-        ).fetchall()
-    return [_row_to_note(r) for r in rows]
-
-
 # --- assessments -----------------------------------------------------------------
 
 

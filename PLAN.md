@@ -24,6 +24,8 @@ The session's **Components Map answer key** is authoritative. Where any later se
 
 Consequences: voice capture (was S2) and news grounding (was S1) move into the **MUST-HAVE** set; triage scale is 0–10 everywhere.
 
+**v2 amendment (25 Sep 2026), from the full Content Engine spec:** triage is now 10 scored parameters with verbatim evidence and per-parameter guardrails, weighted and decided in code (see `docs/publishability_rubric.md`). Only notes scoring **strictly above 8.0** with no hard guardrail flag are drafted, and a flag means human review whatever the score. Notes are processed on arrival, with a scorecard to Meera for every note; the Mon/Wed/Fri schedule became a retry sweep. Drafts get a second model fact check. Review adds Reject (formerly Discard), Regenerate and "I've posted it", and the approved final text is stored separately from the AI draft. **LinkedIn publishing stays manual** (Meera's decision, 25 Sep): the system still never publishes.
+
 ---
 
 ## 1. Executive Understanding

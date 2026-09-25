@@ -42,10 +42,12 @@ class FakeMessage:
         self.from_user = SimpleNamespace(id=user_id)
         self.chat = SimpleNamespace(id=chat_id)
         self.replies: list[tuple[str, str | None]] = []
+        self.markups: list = []
         self.markup_removed = False
 
-    async def reply_text(self, text: str, parse_mode: str | None = None) -> None:
+    async def reply_text(self, text: str, parse_mode: str | None = None, reply_markup=None) -> None:
         self.replies.append((text, parse_mode))
+        self.markups.append(reply_markup)
 
     async def edit_reply_markup(self, reply_markup=None) -> None:
         self.markup_removed = reply_markup is None
@@ -106,9 +108,9 @@ def test_send_for_review_delivers_with_buttons_and_records_message() -> None:
     assert asyncio.run(review.send_for_review(bot, d.id)) is True
     [sent] = bot.sent
     assert sent["chat_id"] == REVIEW_CHAT
-    buttons = [b.callback_data for b in sent["reply_markup"].inline_keyboard[0]]
-    assert buttons == [f"approve:{d.id}", f"edit:{d.id}", f"discard:{d.id}"]
-    assert sent["text"].startswith(f"Draft #{d.id} · rev 1 · Industry Transparency · score 8.5/10")
+    rows = [[b.callback_data for b in row] for row in sent["reply_markup"].inline_keyboard]
+    assert rows == [[f"approve:{d.id}", f"edit:{d.id}"], [f"reject:{d.id}", f"regen:{d.id}"]]
+    assert sent["text"].startswith(f"LINKEDIN DRAFT · Draft #{d.id} · rev 1 · Industry Transparency · score 8.5/10")
     assert BODY in sent["text"]
     assert "News source used: https://news.google.com/rss/articles/x" in sent["text"]
     assert "Nothing is posted anywhere unless you post it yourself." in sent["text"]
@@ -236,7 +238,7 @@ def test_full_rewrite_is_kept_verbatim_as_new_revision() -> None:
     assert (new.revision, new.status, new.model) == (2, "pending_review", "meera-edit")
     assert new.body == REWRITE.strip()
     assert new.exemplar_ids == [4, 12]
-    assert bot.sent and bot.sent[0]["text"].startswith(f"Draft #{new.id} · rev 2")
+    assert bot.sent and bot.sent[0]["text"].startswith(f"LINKEDIN DRAFT · Draft #{new.id} · rev 2") and "your edit" in bot.sent[0]["text"]
 
 
 def test_overlong_rewrite_is_refused_without_changes() -> None:
@@ -250,9 +252,9 @@ def test_overlong_rewrite_is_refused_without_changes() -> None:
 def test_short_instruction_triggers_one_validated_redraft(monkeypatch: pytest.MonkeyPatch) -> None:
     seen = {}
 
-    async def fake_revise(note_text: str, previous: str, instruction: str) -> str:
+    async def fake_revise(note_text: str, previous: str, instruction: str) -> tuple[str, dict]:
         seen.update(note=note_text, previous=previous, instruction=instruction)
-        return "Revised body. " * 20
+        return "Revised body. " * 20, {"passed": True}
 
     monkeypatch.setattr(draft, "revise_draft", fake_revise)
     d = _pending_draft()
@@ -303,7 +305,7 @@ def test_start_delivers_drafts_that_were_waiting_for_it() -> None:
     d = _pending_draft()  # never delivered: Meera hadn't pressed Start yet
     bot = FakeBot()
     asyncio.run(review.handle_start(SimpleNamespace(message=FakeMessage("/start")), SimpleNamespace(bot=bot)))
-    assert [m["text"].split(" · ")[0] for m in bot.sent] == [f"Draft #{d.id}"]
+    assert [m["text"].split(" · ")[1] for m in bot.sent] == [f"Draft #{d.id}"]
     assert db.get_undelivered_drafts() == []
 
 
@@ -390,3 +392,170 @@ def test_callback_handler_only_matches_known_actions() -> None:
 
     assert handler.check_update(query("approve:12"))
     assert not handler.check_update(query("publish:12"))
+
+
+# --- v2: final version storage, posted status, regenerate ------------------------------------
+
+
+def test_approved_ai_draft_is_stored_as_final() -> None:
+    d = _pending_draft()
+    query = _press(f"approve:{d.id}")
+    final = db.get_final_post(d.id)
+    assert (final.final_body, final.ai_draft_body, final.edited_by_meera) == (BODY, BODY, False)
+    assert final.publishing_status == "awaiting_manual_post"
+    [markup] = query.message.markups
+    assert markup.inline_keyboard[0][0].callback_data == f"posted:{d.id}"
+
+
+def test_meera_edit_is_stored_separately_from_ai_draft() -> None:  # TEST 10
+    d = _pending_draft()
+    _press(f"edit:{d.id}")
+    _say(REWRITE)
+    edited = db.get_draft(d.id + 1)
+    _press(f"approve:{edited.id}")
+    final = db.get_final_post(edited.id)
+    assert final.final_body == REWRITE.strip()
+    assert final.ai_draft_body == BODY  # the AI version she replaced is kept for feedback
+    assert final.edited_by_meera is True
+    assert db.get_draft(d.id).body == BODY and db.get_draft(d.id).status == "superseded"
+
+
+def test_mark_posted_once_and_only_after_approval() -> None:
+    d = _pending_draft()
+    assert _press(f"posted:{d.id}").answers == [("Already marked, or not an approved draft.", False)]
+    _press(f"approve:{d.id}")
+    assert _press(f"posted:{d.id}").answers == [("Marked as posted", False)]
+    assert db.get_final_post(d.id).publishing_status == "posted"
+    assert _press(f"posted:{d.id}").answers == [("Already marked, or not an approved draft.", False)]
+
+
+def test_stranger_cannot_mark_posted_or_regenerate() -> None:
+    d = _pending_draft()
+    for action in ("posted", "regen", "reject"):
+        assert _press(f"{action}:{d.id}", user_id=STRANGER).answers == [(review.NOT_AUTHORISED, True)]
+    assert db.get_draft(d.id).status == "pending_review"
+
+
+def test_legacy_discard_button_still_rejects() -> None:
+    d = _pending_draft()
+    _press(f"discard:{d.id}")
+    assert db.get_draft(d.id).status == "discarded"
+
+
+def _regen_result(body: str = "A regenerated body. " * 15) -> draft.DraftResult:
+    return draft.DraftResult(body, "https://news.google.com/n", [1], "gemini-3.5-flash",
+                             {"headline": "h", "source": "Mint", "date": "22 Sep 2026",
+                              "url": "https://news.google.com/n", "relevance": "r"}, {"passed": True})
+
+
+def test_regenerate_creates_new_checked_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    async def fake_draft_note(*args):
+        calls.append(args)
+        return _regen_result()
+
+    monkeypatch.setattr(draft, "draft_note", fake_draft_note)
+    d = _pending_draft()
+    bot = FakeBot()
+    query = FakeQuery(f"regen:{d.id}")
+    asyncio.run(review.handle_callback(SimpleNamespace(callback_query=query), SimpleNamespace(bot=bot)))
+    new = db.get_draft(d.id + 1)
+    assert db.get_draft(d.id).status == "superseded"
+    assert (new.revision, new.status, new.source_url) == (2, "pending_review", "https://news.google.com/n")
+    assert new.news["source"] == "Mint" and new.qa == {"passed": True}
+    assert "NEWS CONTEXT\nHeadline: h\nSource: Mint" in bot.sent[0]["text"]
+    assert calls[0][0] == db.get_note(d.note_id).content
+
+
+def test_regenerate_respects_the_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    import dataclasses
+
+    async def fake_draft_note(*args):
+        return _regen_result()
+
+    monkeypatch.setattr(draft, "draft_note", fake_draft_note)
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, max_regenerations=1))
+    d = _pending_draft()
+    _press(f"regen:{d.id}")
+    blocked = _press(f"regen:{d.id + 1}")
+    assert blocked.answers[0][0].startswith("Regeneration limit reached")
+    assert db.get_draft(d.id + 1).status == "pending_review"
+
+
+@pytest.mark.parametrize(("outcome", "text"), [
+    (None, "couldn't produce a new draft"),
+    (gemini_client.GeminiError("down"), "couldn't reach the AI service"),
+])
+def test_failed_regeneration_keeps_current_draft(monkeypatch: pytest.MonkeyPatch, outcome, text: str) -> None:
+    async def fake_draft_note(*args):
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(draft, "draft_note", fake_draft_note)
+    d = _pending_draft()
+    query = _press(f"regen:{d.id}")
+    assert text in query.message.replies[-1][0]
+    assert db.get_draft(d.id).status == "pending_review"
+
+
+# --- v2: scorecard messages -------------------------------------------------------------------
+
+
+def _result(decision: str, overall: float, flags=(), model: str = "gemini-3.5-flash-lite"):
+    import triage
+
+    def score(p):
+        failing = p.key == "postability"
+        return triage.ParameterScore(p.key, p.name, p.weight, 9.0, 2.0 if failing else 9.0, "r",
+                                     "the finished product pH dropped", True, f"gap {p.name}",
+                                     "fail" if failing else "pass", "", ("guardrail fail",) if failing else ())
+
+    params = tuple(score(p) for p in triage.PARAMETERS)
+    return triage.TriageResult(1, decision, overall, params, tuple(flags),
+                               {"core_idea": "idea", "founder_perspective": "fp", "intended_audience": "aud",
+                                "main_insight": "insight", "topic": "t"}, "Industry Transparency", "a", "k", model,
+                               ("Postability: gap Postability",))
+
+
+def test_scorecard_messages_show_all_parameters_and_decision() -> None:
+    import triage
+
+    note_id = db.add_note(1, -1001, "", T0, "voice", "f", "pending_transcription")
+    db.set_note_transcript(note_id, "batch fourteen came back and the pH drifted", "high", 0.0)
+    note = db.get_note(note_id)
+    result = _result("rejected", 7.9)
+    head = review.format_transcript_message(note, result)
+    assert head.startswith(f"Note #{note.id} · voice note · " + review.DECISION_LABELS["rejected"])
+    assert "TRANSCRIPT\nbatch fourteen came back" in head and "Core idea: idea" in head
+    assert "clarity: high" in head
+    card = review.format_scorecard_message(result)
+    for p in triage.PARAMETERS:
+        assert f"{p.name}: " in card
+    assert "Postability: 2/10 · ×1.5 · fail (capped from 9: guardrail fail)" in card
+    assert "OVERALL SCORE: 7.9/10" in card and "What would make it stronger" in card
+    assert len(card) <= review.TELEGRAM_TEXT_LIMIT and len(head) <= review.TELEGRAM_TEXT_LIMIT
+
+
+def test_human_review_scorecard_lists_flags_and_no_draft() -> None:
+    flag = {"type": "private_customer_information", "detail": "names a customer", "quote": "Priya Sharma"}
+    card = review.format_scorecard_message(_result("human_review", 9.2, [flag]))
+    assert "DECISION: " + review.DECISION_LABELS["human_review"] in card
+    assert "- private customer information: names a customer" in card
+    assert "Nothing will be drafted" in card
+
+
+def test_qualified_scorecard_says_draft_follows() -> None:
+    card = review.format_scorecard_message(_result("qualified", 8.6))
+    assert "DECISION: QUALIFIED FOR DRAFT" in card and "Drafting now" in card
+
+
+def test_send_scorecard_records_message_and_survives_telegram_failure() -> None:
+    note = db.get_note(db.add_note(1, -1001, "a note long enough to score properly here", T0))
+    assessment_id = db.add_assessment(note.id, "m", "v2", "t", {}, [], [], 7.0, "rejected")
+    bot = FakeBot()
+    assert asyncio.run(review.send_scorecard(bot, note, _result("rejected", 7.0), assessment_id)) is True
+    assert len(bot.sent) == 2 and db.get_latest_assessment(note.id).scorecard_message_id == 1002
+    failing = FakeBot([BadRequest("x")])
+    assert asyncio.run(review.send_scorecard(failing, note, _result("rejected", 7.0), None)) is False

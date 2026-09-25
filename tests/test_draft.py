@@ -159,18 +159,27 @@ def test_prompt_without_news_forbids_mentioning_news() -> None:
     assert "None available. Do not mention any news." in prompt
 
 
-# --- make_draft (Gemini mocked) ---------------------------------------------------------
+# --- make_draft (Gemini mocked: drafting and the QA fact check) ------------------------------
+
+
+CLEAN_QA = {"findings": [], "changes_meera_idea": False, "idea_note": "same point", "voice_issues": []}
 
 
 @pytest.fixture
 def model(monkeypatch: pytest.MonkeyPatch) -> dict:
-    state: dict = {"replies": [], "prompts": []}
+    """Fake Gemini. Draft calls pop from `replies`; QA calls pop from `qa` (default: a clean check)."""
+    state: dict = {"replies": [], "prompts": [], "qa": [], "qa_prompts": []}
 
-    async def fake_generate_json(prompt: str, schema: dict, model_name: str) -> dict:
-        assert model_name == config.settings.draft_model
-        assert schema["required"] == ["body", "used_source_url", "self_check"]
-        state["prompts"].append(prompt)
-        reply = state["replies"].pop(0)
+    async def fake_generate_json(prompt: str, schema: dict, model_name: str, attachments=None) -> dict:
+        if "findings" in schema["properties"]:
+            assert model_name == config.settings.qa_model
+            state["qa_prompts"].append(prompt)
+            reply = state["qa"].pop(0) if state["qa"] else CLEAN_QA
+        else:
+            assert model_name == config.settings.draft_model
+            assert schema["required"] == ["body", "used_source_url", "news_relevance", "self_check"]
+            state["prompts"].append(prompt)
+            reply = state["replies"].pop(0)
         if isinstance(reply, Exception):
             raise reply
         return reply
@@ -179,32 +188,65 @@ def model(monkeypatch: pytest.MonkeyPatch) -> dict:
     return state
 
 
-def _reply(body: str = GOOD_BODY, used: str = "", invented: bool = False) -> dict:
-    return {"body": body, "used_source_url": used, "self_check": {"invented_stats": invented, "on_voice": True}}
+def _reply(body: str = GOOD_BODY, used: str = "", invented: bool = False, relevance: str = "") -> dict:
+    return {"body": body, "used_source_url": used, "news_relevance": relevance,
+            "self_check": {"invented_stats": invented, "on_voice": True}}
 
 
 def _make(news: list[NewsItem] | None = None) -> draft.DraftResult | None:
     exemplars = draft.pick_exemplars("Industry Transparency")
-    return asyncio.run(draft.make_draft(NOTE, "Industry Transparency", "angle", exemplars, news))
+    return asyncio.run(draft.make_draft(NOTE, "Industry Transparency", "angle", exemplars, news,
+                                        core_idea="a same-formula reorder is often not the same formula"))
 
 
-def test_make_draft_success(model: dict) -> None:
+def test_make_draft_success_passes_both_qa_layers(model: dict) -> None:
     model["replies"].append(_reply(GOOD_BODY.replace("That sounds small.", "That sounds small—it isn't.")))
     result = _make()
     assert result.body.count(" - ") == 1 and "—" not in result.body  # normalised
-    assert result.source_url is None
+    assert result.source_url is None and result.news is None
     assert result.exemplar_ids == [p.id for p in draft.pick_exemplars("Industry Transparency")]
     assert result.model == config.settings.draft_model
-    assert len(model["prompts"]) == 1
+    assert result.qa["passed"] is True
+    assert len(model["prompts"]) == 1 and len(model["qa_prompts"]) == 1
+    assert "a same-formula reorder is often not the same formula" in model["prompts"][0]  # core idea preserved
+    assert NOTE in model["qa_prompts"][0] and "That sounds small - it isn't." in model["qa_prompts"][0]
 
 
-def test_make_draft_redrafts_once_with_feedback(model: dict) -> None:
+def test_code_validation_failure_skips_the_model_fact_check(model: dict) -> None:
     fabricated = GOOD_BODY.replace("That sounds small.", "A 2026 study found 73% agree. That sounds small.")
     model["replies"] += [_reply(fabricated), _reply()]
     assert _make().body == GOOD_BODY
+    assert len(model["qa_prompts"]) == 1  # only the second (code-valid) draft was fact-checked
     assert "Your previous draft was rejected" not in model["prompts"][0]
     assert "Your previous draft was rejected" in model["prompts"][1]
     assert "2026" in model["prompts"][1] and "73" in model["prompts"][1]
+
+
+def test_qa_catches_hallucinated_story_the_code_cannot_see(model: dict) -> None:  # TEST 9
+    story = GOOD_BODY.replace("That sounds small.", "Our head of quality cried when she saw it. That sounds small.")
+    model["replies"] += [_reply(story), _reply()]
+    model["qa"].append({"findings": [{"claim": "Our head of quality cried when she saw it.", "severity": "blocking",
+                                      "why": "not in the note"}],
+                        "changes_meera_idea": False, "idea_note": "same", "voice_issues": []})
+    assert draft.validate(story, "", {"invented_stats": False, "on_voice": True}, NOTE, []) == []  # code passes it
+    result = _make()
+    assert result.body == GOOD_BODY  # the redraft without the invented story is what survives
+    assert "head of quality cried" in model["prompts"][1]  # redraft told exactly what to remove
+
+
+def test_qa_rejecting_twice_fails_closed(model: dict) -> None:
+    flagged = {"findings": [{"claim": "x", "severity": "blocking", "why": "invented"}], "changes_meera_idea": False,
+               "idea_note": "", "voice_issues": []}
+    model["replies"] += [_reply(), _reply()]
+    model["qa"] += [flagged, flagged]
+    assert _make() is None
+
+
+def test_qa_catches_a_changed_idea(model: dict) -> None:
+    model["replies"] += [_reply(), _reply()]
+    model["qa"] += [{"findings": [], "changes_meera_idea": True, "idea_note": "argues suppliers are fine",
+                     "voice_issues": []}] * 2
+    assert _make() is None
 
 
 def test_make_draft_fails_closed_after_second_rejection(model: dict, caplog) -> None:
@@ -214,10 +256,20 @@ def test_make_draft_fails_closed_after_second_rejection(model: dict, caplog) -> 
     assert "action=drop" in caplog.text
 
 
-def test_make_draft_keeps_a_real_cited_source(model: dict) -> None:
+def test_cited_source_is_recorded_with_relevance(model: dict) -> None:
     body = GOOD_BODY.replace("That sounds small.", "The Hindu reported that 12 batches were flagged. That sounds small.")
-    model["replies"].append(_reply(body, used=NEWS[0].url))
-    assert _make(NEWS).source_url == NEWS[0].url
+    model["replies"].append(_reply(body, used=NEWS[0].url, relevance="shows supplier changes are a wider issue"))
+    result = _make(NEWS)
+    assert result.source_url == NEWS[0].url
+    assert result.news == {"headline": NEWS[0].title, "source": "The Hindu", "date": "22 Sep 2026",
+                           "url": NEWS[0].url, "relevance": "shows supplier changes are a wider issue"}
+    assert "CITED HEADLINE (The Hindu)" in model["qa_prompts"][0]
+
+
+def test_cited_source_without_relevance_is_rejected(model: dict) -> None:
+    body = GOOD_BODY.replace("That sounds small.", "The Hindu reported that 12 batches were flagged. That sounds small.")
+    model["replies"] += [_reply(body, used=NEWS[0].url), _reply(body, used=NEWS[0].url)]
+    assert _make(NEWS) is None
 
 
 def test_make_draft_rejects_hallucinated_source_then_drops(model: dict) -> None:
@@ -229,6 +281,29 @@ def test_make_draft_propagates_gemini_outage(model: dict) -> None:
     model["replies"].append(gemini_client.GeminiError("model call failed: ServerError 503 UNAVAILABLE"))
     with pytest.raises(gemini_client.GeminiError):
         _make()
+
+
+def test_qa_outage_also_propagates(model: dict) -> None:
+    model["replies"].append(_reply())
+    model["qa"].append(gemini_client.GeminiError("model call failed: ServerError 503 UNAVAILABLE"))
+    with pytest.raises(gemini_client.GeminiError):
+        _make()
+
+
+def test_draft_note_fetches_news_then_drafts(model: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    import news
+
+    asked = []
+
+    async def fake_fetch(keywords: str) -> list[NewsItem]:
+        asked.append(keywords)
+        return []
+
+    monkeypatch.setattr(news, "fetch_news", fake_fetch)
+    model["replies"].append(_reply())
+    result = asyncio.run(draft.draft_note(NOTE, "Industry Transparency", "angle", "idea", "preservative supplier"))
+    assert asked == ["preservative supplier"] and result.body == GOOD_BODY
+    assert "None available. Do not mention any news." in model["prompts"][0]
 
 
 def test_invented_timing_is_caught_but_note_timing_allowed() -> None:
@@ -248,22 +323,22 @@ def test_voice_skill_forbids_invented_scenes_and_copying() -> None:
 # --- revise_draft (Meera's one-line instruction) --------------------------------------
 
 
-def _revise(instruction: str = "shorter, open with the pH") -> str | None:
+def _revise(instruction: str = "shorter, open with the pH"):
     return asyncio.run(draft.revise_draft(NOTE, GOOD_BODY, instruction))
 
 
-def test_revise_returns_validated_body_and_includes_instruction(model: dict) -> None:
+def test_revise_returns_validated_body_and_qa(model: dict) -> None:
     model["replies"].append(_reply(GOOD_BODY.replace("That sounds small.", "It sounds small.")))
-    assert "It sounds small." in _revise()
+    body, qa = _revise()
+    assert "It sounds small." in body and qa["passed"] is True
     prompt = model["prompts"][0]
     assert "<<<INSTRUCTION\nshorter, open with the pH\nINSTRUCTION>>>" in prompt
     assert GOOD_BODY in prompt and NOTE in prompt
 
 
 def test_revise_allows_facts_from_previous_draft_but_not_new_ones(model: dict) -> None:
-    previous_only = GOOD_BODY  # "Batch 14", "0.4", "three months" all trace to note/previous draft
-    model["replies"].append(_reply(previous_only))
-    assert _revise() == previous_only
+    model["replies"].append(_reply(GOOD_BODY))
+    assert _revise()[0] == GOOD_BODY
     invented = GOOD_BODY.replace("That sounds small.", "Returns rose 40% after this. That sounds small.")
     model["replies"] += [_reply(invented), _reply(invented)]
     assert _revise("add a statistic") is None
@@ -274,3 +349,21 @@ def test_revise_propagates_gemini_outage(model: dict) -> None:
     model["replies"].append(gemini_client.GeminiError("down"))
     with pytest.raises(gemini_client.GeminiError):
         _revise()
+
+
+def test_minor_qa_findings_are_recorded_but_do_not_block(model: dict) -> None:
+    model["replies"].append(_reply())
+    model["qa"].append({"findings": [{"claim": "occlusives slow water loss", "severity": "minor",
+                                      "why": "general chemistry explanation"}],
+                        "changes_meera_idea": False, "idea_note": "same", "voice_issues": ["slightly formal"]})
+    result = _make()
+    assert result is not None and result.qa["passed"] is True
+    assert result.qa["minor"][0]["claim"] == "occlusives slow water loss" and result.qa["blocking"] == []
+
+
+def test_unclear_severity_is_treated_as_blocking(model: dict) -> None:
+    model["replies"] += [_reply(), _reply()]
+    odd = {"findings": [{"claim": "x", "severity": "maybe", "why": "?"}], "changes_meera_idea": False,
+           "idea_note": "", "voice_issues": []}
+    model["qa"] += [odd, odd]
+    assert _make() is None

@@ -17,6 +17,10 @@ from telegram.ext import ContextTypes
 import config
 import db
 import gemini_client
+import review
+
+NOTICE_UNINTELLIGIBLE = ("I couldn't make out your latest voice note (it may be silent or too noisy), "
+                         "so nothing was saved from it. Please re-record it or type it.")
 
 log = logging.getLogger(__name__)
 
@@ -60,20 +64,6 @@ def sender_of(post: Message) -> str:
     if post.sender_chat is not None:
         return f"chat:{post.sender_chat.id}"
     return "unknown"
-
-
-def unclear_ratio(text: str) -> float:
-    """Share of words the transcriber marked [unclear]."""
-    words = len(text.split())
-    return round(text.count("[unclear]") / words, 3) if words else 1.0
-
-
-def is_low_confidence(note: db.Note) -> bool:
-    """A voice transcript we can't trust must not be scored or drafted from."""
-    if note.content_type != "voice":
-        return False
-    ratio = note.unclear_ratio if note.unclear_ratio is not None else 0.0
-    return note.transcript_clarity == "low" or ratio > config.settings.transcript_max_unclear_ratio
 
 
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
@@ -130,9 +120,15 @@ async def transcribe_note(bot: Bot, note: db.Note) -> bool:
         transcript = await gemini_client.transcribe_audio(
             audio, gemini_client.TELEGRAM_VOICE_MIME, config.settings.transcribe_model
         )
-        ratio = unclear_ratio(transcript.text)
+        ratio = transcript.unclear_ratio
         content = f"{note.content}\n\n{transcript.text}" if note.content else transcript.text
         updated = await asyncio.to_thread(db.set_note_transcript, note.id, content, transcript.clarity, ratio)
+    except gemini_client.EmptyTranscript:
+        # Silence or noise: retrying the same audio won't help, so shelve it and tell Meera.
+        await asyncio.to_thread(db.set_note_status, note.id, "shelved")
+        await review.send_notice(bot, NOTICE_UNINTELLIGIBLE)
+        log.info("ingest.unintelligible note_id=%s action=shelved", note.id)
+        return False
     except (TelegramError, gemini_client.GeminiError) as exc:
         log.warning("ingest.transcribe_failed note_id=%s error=%s", note.id, exc)
         return False
