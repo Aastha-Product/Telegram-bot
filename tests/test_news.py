@@ -118,12 +118,15 @@ def test_client_errors_are_not_retried(served: dict) -> None:
     assert len(served["requests"]) == 1
 
 
-def test_relevance_needs_two_topical_words() -> None:
+def test_relevance_needs_one_topical_word_in_the_headline() -> None:
     item = news.NewsItem("Preservative rules change for cosmetic makers", "S", "https://x", NOW)
     assert news.is_relevant(item, "cosmetic preservative supplier")
-    assert not news.is_relevant(item, "sunscreen supplier India")
-    assert news.is_relevant(news.NewsItem("Ceramide study", "S", "https://x", NOW), "ceramide")
+    assert news.is_relevant(news.NewsItem("How to know if your sunscreen really works", "S", "https://x", NOW),
+                            "sunscreen formulation filter humidity")
+    assert not news.is_relevant(item, "sunscreen humidity")
     assert not news.is_relevant(item, "India news")
+    pickles = news.NewsItem("Preservative in pickles", "S", "https://x", NOW)
+    assert not news.is_relevant(pickles, "preservative supplier cosmetics")  # one word, wrong industry
 
 
 def test_recency_window() -> None:
@@ -135,17 +138,24 @@ def test_recency_window() -> None:
     assert not news.is_recent(news.NewsItem("t", "s", "https://x", None), NOW)
 
 
-def test_long_query_falls_back_to_first_three_topical_words(served: dict) -> None:
-    served["responses"] += [httpx.Response(200, content=_feed()), httpx.Response(200, content=FEED)]
-    items = _fetch("cosmetic preservative supplier formulation audit")
+def test_search_goes_from_narrow_to_broad_until_something_fits(served: dict) -> None:
+    served["responses"] += [httpx.Response(200, content=_feed())] * 3 + [httpx.Response(200, content=FEED)]
+    items = _fetch("preservative supplier formulation audit")
     assert [r.url.params["q"] for r in served["requests"]] == [
-        "cosmetic preservative supplier formulation audit when:14d",
-        "cosmetic preservative supplier when:14d",
+        "preservative supplier formulation audit when:14d",
+        "preservative supplier formulation when:14d",
+        "preservative supplier when:14d",
+        "preservative when:14d",
     ]
     assert len(items) == 2
 
 
-def test_short_query_does_not_fall_back(served: dict) -> None:
-    served["responses"].append(httpx.Response(200, content=_feed()))
-    assert _fetch("cosmetic preservative supplier") == []
+def test_search_stops_at_the_first_query_that_finds_news(served: dict) -> None:
+    served["responses"].append(httpx.Response(200, content=FEED))
+    assert len(_fetch("cosmetic preservative supplier")) == 2
     assert len(served["requests"]) == 1
+
+
+def test_search_queries_are_unique_and_topic_first() -> None:
+    assert news.search_queries("sunscreen SPF humidity") == ["sunscreen SPF humidity", "sunscreen humidity", "sunscreen"]
+    assert news.search_queries("ceramide") == ["ceramide"]

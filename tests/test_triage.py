@@ -201,7 +201,7 @@ def test_news_keywords_are_sanitised() -> None:
     data = reply()
     data["news_keywords"] = '"preservative" & supplier; https://evil.example/?q=1 India more words'
     result = triage.parse_assessment(_note(), data, "m")
-    assert result.news_keywords == "preservative supplier https evil example q"
+    assert result.news_keywords == "preservative supplier https evil"
 
 
 # --- assess_note (model mocked) --------------------------------------------------------------

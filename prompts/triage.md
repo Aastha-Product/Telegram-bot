@@ -44,7 +44,7 @@ Hard flags are only for content that would be risky to publish. A note that is s
 - summary: core_idea, founder_perspective, intended_audience, main_insight and topic (a few words), each one sentence, using only the note
 - category: one of {categories}
 - suggested_angle: one sentence stating the post's core argument, using only material in the note
-- news_keywords: 2 to 4 plain search words for finding related current news (for example: cosmetic preservative supplier India). No quotes, no punctuation.
+- news_keywords: 2 to 4 plain search words for finding related current news, the main topic word first (for example: sunscreen SPF humidity, or preservative supplier cosmetics). No quotes, no punctuation.
 
 # Pieces Meera has already published (titles or opening lines)
 {published}

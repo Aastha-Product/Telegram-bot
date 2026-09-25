@@ -24,9 +24,12 @@ REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_RETRIES = 3
 BACKOFF_BASE_SECONDS = 1.0
 MIN_KEYWORD_LENGTH = 4
-FALLBACK_WORDS = 3
 # Too generic to count as a topical match on their own.
 GENERIC_WORDS = frozenset({"india", "indian", "news", "latest", "update", "brand", "brands", "market"})
+
+# Words that mark a headline as being about skincare/beauty.
+DOMAIN_WORDS: tuple[str, ...] = ("skin", "cosmetic", "beauty", "sunscreen", "spf", "serum", "moistur",
+                                 "derma", "personal care", "cream", "lotion", "ingredient", "formulat", "fragrance")
 
 # Publishers whose headlines may be cited. Google News aggregates everything (press releases,
 # content farms); a hook must come from a recognisable newsroom or trade title.
@@ -69,13 +72,26 @@ def significant_words(keywords: str) -> list[str]:
 
 
 def is_relevant(item: NewsItem, keywords: str) -> bool:
-    """A headline must share at least two topical words with the note (or one, if that's all we have)."""
-    words = significant_words(keywords)
-    if not words:
-        return False
+    """Two of the note's topical words in the headline, or one plus a skincare/beauty word.
+
+    The domain check keeps a single shared word from pulling in another industry
+    ("preservative" in a pickles story). Whether a relevant hook is actually used is still
+    decided by the draft prompt's "only if it genuinely fits" rule and the fact check.
+    """
     title = item.title.lower()
-    hits = sum(1 for w in words if w in title)
-    return hits >= min(2, len(words))
+    hits = sum(1 for w in significant_words(keywords) if w in title)
+    return hits >= 2 or (hits == 1 and any(d in title for d in DOMAIN_WORDS))
+
+
+def search_queries(keywords: str) -> list[str]:
+    """Narrow to broad: the full keywords, then the first 3, 2 and 1 topical words.
+
+    Google News requires every word to match, so a precise query often finds nothing
+    while the main topic word ("sunscreen") finds this week's coverage.
+    """
+    words = significant_words(keywords)
+    queries = [keywords] + [" ".join(words[:n]) for n in (3, 2, 1)]
+    return list(dict.fromkeys(q for q in queries if q))
 
 
 def is_credible(item: NewsItem) -> bool:
@@ -156,10 +172,13 @@ async def fetch_news(keywords: str, now: datetime | None = None) -> list[NewsIte
         return []
     now = now or datetime.now(UTC)
     try:
-        fetched, kept = await _search(keywords, now)
-        # Google News ANDs every term, so long queries often match nothing; retry broader once.
-        if not kept and len(words) > FALLBACK_WORDS:
-            fetched, kept = await _search(" ".join(words[:FALLBACK_WORDS]), now)
+        fetched, kept = 0, []
+        for query in search_queries(keywords):
+            fetched, kept = await _search(query, now)
+            # Relevance is always judged against the note's full keywords, not the broadened query.
+            kept = [i for i in kept if is_relevant(i, keywords)]
+            if kept:
+                break
     except Exception as exc:
         log.warning("news.unavailable error=%s", type(exc).__name__)
         return []
