@@ -487,3 +487,46 @@ def test_every_update_is_described_without_content() -> None:
     assert text == "kind=message chat=5 chat_type=private from=77 media=voice"
     secret = app.describe_update(Update(update_id=2, channel_post=_post(text="private formulation detail")))
     assert "private formulation detail" not in secret and "media=text" in secret
+
+
+# --- typed ideas in the bot chat ------------------------------------------------------------------
+
+
+def test_meera_typed_idea_in_bot_chat_becomes_a_note() -> None:
+    message = PrivateVoice()
+    message.voice, message.text = None, "I want to write about why a same-formula reorder is not the same formula"
+    note_id = asyncio.run(ingest.handle_private_text(SimpleNamespace(message=message, update_id=3),
+                                                     SimpleNamespace(bot=FakeBot())))
+    note = db.get_note(note_id)
+    assert (note.content_type, note.status, note.content) == ("text", "new", message.text)
+    assert message.replies == [ingest.ACK_TEXT]
+
+
+def test_typed_text_from_others_is_ignored() -> None:
+    message = PrivateVoice(user_id=424242)
+    message.voice, message.text = None, "hello bot"
+    assert asyncio.run(ingest.handle_private_text(SimpleNamespace(message=message, update_id=3),
+                                                  SimpleNamespace(bot=FakeBot()))) is None
+    assert _all_notes() == [] and message.replies == []
+
+
+def test_bot_chat_text_is_an_edit_reply_only_when_a_draft_awaits_edit(monkeypatch: pytest.MonkeyPatch) -> None:
+    import review
+
+    routed = []
+
+    async def fake_edit(update, context):
+        routed.append("edit")
+
+    async def fake_note(update, context):
+        routed.append("note")
+        return None
+
+    monkeypatch.setattr(review, "handle_review_message", fake_edit)
+    monkeypatch.setattr(ingest, "handle_private_text", fake_note)
+    context = SimpleNamespace(bot=FakeBot())
+    asyncio.run(app.on_private_text(SimpleNamespace(), context))
+    note_id = db.add_note(1, -1001, "a note", WHEN)
+    db.start_edit(db.add_draft(note_id, "draft body", "m"))
+    asyncio.run(app.on_private_text(SimpleNamespace(), context))
+    assert routed == ["note", "edit"]

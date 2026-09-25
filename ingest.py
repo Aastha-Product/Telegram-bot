@@ -20,8 +20,9 @@ import gemini_client
 import review
 
 ACK_VOICE = "Got your voice note. Transcribing and scoring it now..."
-HELP_PRIVATE = ("I can take voice notes here (or audio files). To edit a draft, tap Edit on it first and then "
-                "type your change. Nothing else in this chat is used.")
+ACK_TEXT = "Got your note. Scoring it now..."
+HELP_PRIVATE = ("Send me a voice note or type your idea here and I'll score it. To edit a draft, tap Edit on it "
+                "first and then type your change.")
 NOTICE_UNINTELLIGIBLE = ("I couldn't make out your latest voice note (it may be silent or too noisy), "
                          "so nothing was saved from it. Please re-record it or type it.")
 
@@ -117,6 +118,23 @@ async def handle_private_voice(update: Update, context: ContextTypes.DEFAULT_TYP
         log.warning("ingest.rejected update_id=%s reason=not_meera_private_voice", update.update_id)
         return None
     await review.reply_safely(message, ACK_VOICE)
+    return await _store_and_prepare(context.bot, message, extract_note(message))
+
+
+def _is_meera_in_review_chat(message: Message) -> bool:
+    return (message.from_user is not None and message.from_user.id == config.settings.meera_user_id
+            and message.chat.id == config.settings.telegram_review_chat_id)
+
+
+async def handle_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    """A typed idea in the bot chat (when no draft is waiting for an edit) is a note, like a voice note."""
+    message = update.message
+    if message is None or not message.text or not message.text.strip():
+        return None
+    if not _is_meera_in_review_chat(message):
+        log.warning("ingest.rejected update_id=%s reason=not_meera_private_text", update.update_id)
+        return None
+    await review.reply_safely(message, ACK_TEXT)
     return await _store_and_prepare(context.bot, message, extract_note(message))
 
 

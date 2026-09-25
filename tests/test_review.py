@@ -376,7 +376,7 @@ def _text_update(user_id: int, chat_id: int, text: str = "hello") -> Update:
 
 
 def test_review_message_handler_only_accepts_meera_in_review_chat() -> None:
-    handler = next(h for h in _handlers() if getattr(h, "callback", None) is review.handle_review_message)
+    handler = next(h for h in _handlers() if getattr(h, "callback", None) is app.on_private_text)
     assert handler.check_update(_text_update(MEERA, REVIEW_CHAT))
     assert not handler.check_update(_text_update(STRANGER, REVIEW_CHAT))
     assert not handler.check_update(_text_update(MEERA, -100777))

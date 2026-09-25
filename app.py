@@ -150,7 +150,7 @@ def build_application(serverless: bool = False) -> Application:
     application.add_handler(
         MessageHandler(
             filters.UpdateType.MESSAGE & filters.TEXT & ~filters.COMMAND & meera_in_review_chat,
-            review.handle_review_message,
+            on_private_text,
         )
     )
     application.add_handler(
@@ -202,6 +202,16 @@ async def log_update(update: object, context: ContextTypes.DEFAULT_TYPE) -> None
 async def on_private_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Meera can also send voice notes straight to the bot chat; same flow as the channel."""
     note_id = await ingest.handle_private_voice(update, context)
+    if note_id is not None:
+        await _process_now_or_later(update, context, note_id)
+
+
+async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Typed text in the bot chat: an edit reply if she pressed Edit on a draft, otherwise a new note."""
+    if await asyncio.to_thread(db.get_awaiting_edit) is not None:
+        await review.handle_review_message(update, context)
+        return
+    note_id = await ingest.handle_private_text(update, context)
     if note_id is not None:
         await _process_now_or_later(update, context, note_id)
 
