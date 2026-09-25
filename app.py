@@ -19,6 +19,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -40,6 +41,8 @@ REQUIRED_PROMPTS: tuple[str, ...] = ("triage", "draft", "revise", "repair", "tra
 
 ALLOWED_UPDATES: list[str] = [Update.CHANNEL_POST, Update.MESSAGE, Update.CALLBACK_QUERY]
 FIRST_SWEEP_SECONDS = 60
+# Anything spoken: voice notes, audio files, round video messages, audio attachments.
+RECORDING = filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE | filters.Document.AUDIO
 
 
 class RedactSecrets(logging.Filter):
@@ -119,6 +122,8 @@ def build_application() -> Application:
         .build()
     )
     settings = config.settings
+    # Group -1 runs before everything else: record the shape of every update, never its content.
+    application.add_handler(TypeHandler(Update, log_update), group=-1)
     application.add_handler(
         MessageHandler(
             filters.UpdateType.CHANNEL_POST & filters.Chat(chat_id=settings.telegram_chat_id),
@@ -132,12 +137,18 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("run", pipeline.handle_run_command, filters=meera_in_review_chat))
     application.add_handler(CallbackQueryHandler(review.handle_callback, pattern=review.CALLBACK_RE))
     application.add_handler(
-        MessageHandler(filters.UpdateType.MESSAGE & filters.VOICE & meera_in_review_chat, on_private_voice)
+        MessageHandler(filters.UpdateType.MESSAGE & RECORDING & meera_in_review_chat, on_private_voice)
     )
     application.add_handler(
         MessageHandler(
             filters.UpdateType.MESSAGE & filters.TEXT & ~filters.COMMAND & meera_in_review_chat,
             review.handle_review_message,
+        )
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.UpdateType.MESSAGE & ~filters.TEXT & ~RECORDING & ~filters.COMMAND & meera_in_review_chat,
+            ingest.handle_private_other,
         )
     )
     application.add_error_handler(on_error)
@@ -150,6 +161,25 @@ async def on_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     note_id = await ingest.handle_channel_post(update, context)
     if note_id is not None:
         context.application.create_task(pipeline.process_note(context.bot, note_id), update=update)
+
+
+def describe_update(update: Update) -> str:
+    """Shape of an update for diagnostics: kind, chat, sender and media type. No message content."""
+    message = update.effective_message
+    if update.callback_query is not None:
+        return f"kind=button from={update.callback_query.from_user.id}"
+    if message is None:
+        return "kind=other"
+    kind = "channel_post" if update.channel_post is not None else "message"
+    media = next((m for m in ("voice", "audio", "video_note", "document", "text", "photo", "sticker", "video")
+                  if getattr(message, m, None)), "other")
+    sender = message.from_user.id if message.from_user else None
+    return f"kind={kind} chat={message.chat.id} chat_type={message.chat.type} from={sender} media={media}"
+
+
+async def log_update(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if isinstance(update, Update):
+        log.info("app.update_received update_id=%s %s", update.update_id, describe_update(update))
 
 
 async def on_private_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

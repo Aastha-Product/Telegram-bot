@@ -20,6 +20,8 @@ import gemini_client
 import review
 
 ACK_VOICE = "Got your voice note. Transcribing and scoring it now..."
+HELP_PRIVATE = ("I can take voice notes here (or audio files). To edit a draft, tap Edit on it first and then "
+                "type your change. Nothing else in this chat is used.")
 NOTICE_UNINTELLIGIBLE = ("I couldn't make out your latest voice note (it may be silent or too noisy), "
                          "so nothing was saved from it. Please re-record it or type it.")
 
@@ -32,6 +34,21 @@ class NoteInput:
     content_type: str
     status: str
     tg_file_id: str | None = None
+    media_mime: str | None = None
+
+
+def recording_of(message: Message) -> tuple[str, str] | None:
+    """(file_id, mime) for anything spoken: voice note, audio file, round video message, or audio attachment."""
+    if message.voice is not None:
+        return message.voice.file_id, message.voice.mime_type or gemini_client.TELEGRAM_VOICE_MIME
+    if message.audio is not None:
+        return message.audio.file_id, message.audio.mime_type or "audio/mpeg"
+    if message.video_note is not None:
+        return message.video_note.file_id, "video/mp4"
+    document = message.document
+    if document is not None and (document.mime_type or "").startswith("audio/"):
+        return document.file_id, document.mime_type
+    return None
 
 
 def extract_note(message: Message) -> NoteInput | None:
@@ -39,10 +56,11 @@ def extract_note(message: Message) -> NoteInput | None:
     if message.text is not None:
         text = message.text.strip()
         return NoteInput(text, "text", "new") if text else None
-    if message.voice is not None:
+    recording = recording_of(message)
+    if recording is not None:
         # Transcribed right after storing; any caption is kept alongside the transcript.
-        return NoteInput((message.caption or "").strip(), "voice", "pending_transcription",
-                         message.voice.file_id)
+        file_id, mime = recording
+        return NoteInput((message.caption or "").strip(), "voice", "pending_transcription", file_id, mime)
     caption = (message.caption or "").strip()
     if caption:
         return NoteInput(caption, "text", "new")
@@ -91,7 +109,7 @@ async def handle_private_voice(update: Update, context: ContextTypes.DEFAULT_TYP
     Never raises; returns the note id if it is ready for triage.
     """
     message = update.message
-    if message is None or message.voice is None:
+    if message is None or recording_of(message) is None:
         return None
     # The handler filter already restricts this, but authorisation is enforced here too.
     if (message.from_user is None or message.from_user.id != config.settings.meera_user_id
@@ -115,6 +133,7 @@ async def _store_and_prepare(bot: Bot, message: Message, note: NoteInput) -> int
             note.tg_file_id,
             note.status,
             sender_of(message),
+            note.media_mime,
         )
     except Exception:
         log.exception("ingest.failed message_id=%s content_type=%s", message.message_id, note.content_type)
@@ -142,7 +161,7 @@ async def transcribe_note(bot: Bot, note: db.Note) -> bool:
         tg_file = await bot.get_file(note.tg_file_id)
         audio = bytes(await tg_file.download_as_bytearray())
         transcript = await gemini_client.transcribe_audio(
-            audio, gemini_client.TELEGRAM_VOICE_MIME, config.settings.transcribe_model
+            audio, note.media_mime or gemini_client.TELEGRAM_VOICE_MIME, config.settings.transcribe_model
         )
         ratio = transcript.unclear_ratio
         content = f"{note.content}\n\n{transcript.text}" if note.content else transcript.text
@@ -178,3 +197,11 @@ async def transcribe_pending(bot: Bot) -> int:
     if pending:
         log.info("ingest.transcribe_pending attempted=%d succeeded=%d", len(pending), done)
     return done
+
+
+async def handle_private_other(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Anything else Meera sends the bot chat that isn't usable: answer, so she never gets silence."""
+    message = update.message
+    if message is None or message.from_user is None or message.from_user.id != config.settings.meera_user_id:
+        return
+    await review.reply_safely(message, HELP_PRIVATE)

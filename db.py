@@ -131,6 +131,12 @@ MIGRATIONS: tuple[str, ...] = (
     PRAGMA user_version = 5;
     COMMIT;
     """,
+    """
+    BEGIN;
+    ALTER TABLE notes ADD COLUMN media_mime TEXT;
+    PRAGMA user_version = 6;
+    COMMIT;
+    """,
 )
 
 DECISIONS: tuple[str, ...] = ("qualified", "rejected", "human_review")
@@ -158,6 +164,7 @@ class Note:
     sender: str | None = None
     transcript_clarity: str | None = None
     unclear_ratio: float | None = None
+    media_mime: str | None = None
 
 
 @dataclass(frozen=True)
@@ -285,6 +292,7 @@ def add_note(
     tg_file_id: str | None = None,
     status: str = "new",
     sender: str | None = None,
+    media_mime: str | None = None,
 ) -> int | None:
     """Insert a note; return its id, or None if this Telegram message was already stored.
 
@@ -300,13 +308,13 @@ def add_note(
         row = conn.execute(
             """
             INSERT INTO notes (tg_message_id, tg_chat_id, content, content_type,
-                               tg_file_id, created_at, status, sender)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                               tg_file_id, created_at, status, sender, media_mime)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (tg_chat_id, tg_message_id) DO NOTHING
             RETURNING id
             """,
             (tg_message_id, tg_chat_id, content, content_type, tg_file_id,
-             _to_iso(created_at), status, sender),
+             _to_iso(created_at), status, sender, media_mime),
         ).fetchone()
     return row["id"] if row else None
 
@@ -403,6 +411,7 @@ def _row_to_note(row: sqlite3.Row) -> Note:
         sender=row["sender"],
         transcript_clarity=row["transcript_clarity"],
         unclear_ratio=row["unclear_ratio"],
+        media_mime=row["media_mime"],
     )
 
 

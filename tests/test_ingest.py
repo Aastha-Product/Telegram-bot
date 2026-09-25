@@ -107,7 +107,7 @@ def test_extract_blank_text_is_ignored() -> None:
 
 def test_extract_voice_pending_transcription() -> None:
     note = ingest.extract_note(_post(voice=_voice()))
-    assert note == ingest.NoteInput("", "voice", "pending_transcription", "AwACAgUAAxkBVOICE")
+    assert note == ingest.NoteInput("", "voice", "pending_transcription", "AwACAgUAAxkBVOICE", "audio/ogg")
 
 
 def test_extract_voice_keeps_caption() -> None:
@@ -436,3 +436,54 @@ def test_app_routes_meera_voice_in_bot_chat_only() -> None:
     assert handler.check_update(voice_update(meera, review_chat))
     assert not handler.check_update(voice_update(424242, review_chat))
     assert not handler.check_update(voice_update(meera, -100777))
+
+
+# --- other recording types, help reply, diagnostics -------------------------------------------
+
+
+def test_audio_files_round_videos_and_audio_attachments_are_recordings() -> None:
+    from telegram import Audio, Document, VideoNote
+
+    audio = _post(audio=Audio(file_id="A1", file_unique_id="a", duration=30, mime_type="audio/mp4"))
+    video_note = _post(video_note=VideoNote(file_id="V1", file_unique_id="v", length=240, duration=20))
+    attachment = _post(document=Document(file_id="D1", file_unique_id="d", mime_type="audio/mpeg"))
+    pdf = _post(document=Document(file_id="P1", file_unique_id="p", mime_type="application/pdf"))
+    assert ingest.recording_of(audio) == ("A1", "audio/mp4")
+    assert ingest.recording_of(video_note) == ("V1", "video/mp4")
+    assert ingest.recording_of(attachment) == ("D1", "audio/mpeg")
+    assert ingest.recording_of(pdf) is None
+    assert ingest.extract_note(audio) == ingest.NoteInput("", "voice", "pending_transcription", "A1", "audio/mp4")
+
+
+def test_recording_is_transcribed_with_its_real_mime(monkeypatch: pytest.MonkeyPatch) -> None:
+    from telegram import Audio
+
+    seen = []
+
+    async def fake_transcribe(audio: bytes, mime_type: str, model: str) -> gemini_client.Transcript:
+        seen.append(mime_type)
+        return gemini_client.Transcript("a clear spoken note about batch fourteen", "high", ["English"])
+
+    monkeypatch.setattr(gemini_client, "transcribe_audio", fake_transcribe)
+    post = _post(audio=Audio(file_id="A1", file_unique_id="a", duration=30, mime_type="audio/mp4"))
+    _handle(Update(update_id=1, channel_post=post), FakeBot())
+    assert seen == ["audio/mp4"] and db.get_new_notes()[0].media_mime == "audio/mp4"
+
+
+def test_unusable_private_message_gets_a_help_reply() -> None:
+    mine, theirs = PrivateVoice(), PrivateVoice(user_id=424242)
+    for m in (mine, theirs):
+        m.voice = None
+        asyncio.run(ingest.handle_private_other(SimpleNamespace(message=m), SimpleNamespace(bot=FakeBot())))
+    assert mine.replies == [ingest.HELP_PRIVATE] and theirs.replies == []
+
+
+def test_every_update_is_described_without_content() -> None:
+    from telegram import User
+
+    msg = Message(message_id=1, date=WHEN, chat=Chat(id=5, type=Chat.PRIVATE), voice=_voice(),
+                  from_user=User(id=77, first_name="x", is_bot=False))
+    text = app.describe_update(Update(update_id=1, message=msg))
+    assert text == "kind=message chat=5 chat_type=private from=77 media=voice"
+    secret = app.describe_update(Update(update_id=2, channel_post=_post(text="private formulation detail")))
+    assert "private formulation detail" not in secret and "media=text" in secret
