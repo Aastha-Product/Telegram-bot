@@ -26,6 +26,7 @@ Rules for news: use at most one item, and only if it genuinely connects to the n
 
 # Facts
 Use only facts that appear in the note (and in the headline, if you use one). Do not add any number, percentage, date, timing (such as "last week"), study, survey, statistic, brand, named person, customer story or event that is not there. You may restate the note's own numbers exactly. When the note is vague, stay vague.
+Use the note's own words for things: do not name a product type (moisturiser, serum, sunscreen), ingredient, cause, customer detail or process step that the note doesn't state; "the finished product" is fine if that's what she said. Do not generalise about suppliers, brands or the industry beyond what her own example shows.
 
 # Output
 Return JSON with:

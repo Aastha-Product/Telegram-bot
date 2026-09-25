@@ -374,19 +374,21 @@ async def _attempt(prompt: str, note_text: str, news: list[NewsItem]
 
 async def make_draft(note_text: str, category: str | None, angle: str, exemplars: list[CorpusPiece],
                      news: list[NewsItem] | None = None, core_idea: str = "") -> DraftResult | None:
-    """Draft, validate, fact-check; redraft once on any problem; None if it still fails (fail closed).
+    """Draft, validate, fact-check; redraft with the exact problems up to DRAFT_ATTEMPTS; None if it still fails.
 
     Raises GeminiError if the model is unreachable, so callers can tell 'AI down' from 'draft rejected'.
     """
     news = news or []
-    prompt = build_prompt(note_text, category, angle, exemplars, news, core_idea=core_idea)
-    body, cited, relevance, problems, qa = await _attempt(prompt, note_text, news)
-    if problems:
-        log.warning("draft.rejected attempt=1 problems=%s", problems)
-        prompt = build_prompt(note_text, category, angle, exemplars, news, _feedback(problems), core_idea)
+    feedback = ""
+    for attempt in range(1, config.settings.draft_attempts + 1):
+        prompt = build_prompt(note_text, category, angle, exemplars, news, feedback, core_idea)
         body, cited, relevance, problems, qa = await _attempt(prompt, note_text, news)
+        if not problems:
+            break
+        last = attempt == config.settings.draft_attempts
+        log.warning("draft.rejected attempt=%d problems=%s%s", attempt, problems, " action=drop" if last else "")
+        feedback = _feedback(problems)
     if problems:
-        log.warning("draft.rejected attempt=2 problems=%s action=drop", problems)
         return None
     return DraftResult(
         body=body, source_url=cited.url if cited else None, exemplar_ids=[p.id for p in exemplars],
@@ -408,14 +410,15 @@ async def revise_draft(note_text: str, previous_body: str, instruction: str) -> 
         )
 
     sources = note_text + "\n" + previous_body
-    body, _, _, problems, qa = await _attempt(prompt(), sources, [])
-    if problems:
-        log.warning("draft.revision_rejected attempt=1 problems=%s", problems)
-        body, _, _, problems, qa = await _attempt(prompt(_feedback(problems)), sources, [])
-    if problems:
-        log.warning("draft.revision_rejected attempt=2 problems=%s action=drop", problems)
-        return None
-    return body, qa
+    feedback = ""
+    for attempt in range(1, config.settings.draft_attempts + 1):
+        body, _, _, problems, qa = await _attempt(prompt(feedback), sources, [])
+        if not problems:
+            return body, qa
+        last = attempt == config.settings.draft_attempts
+        log.warning("draft.revision_rejected attempt=%d problems=%s%s", attempt, problems, " action=drop" if last else "")
+        feedback = _feedback(problems)
+    return None
 
 
 async def draft_note(note_text: str, category: str | None, angle: str, core_idea: str,

@@ -40,6 +40,7 @@ DEFAULTS: dict[str, str] = {
     "QA_MODEL": "gemini-3.5-flash",
     "SWEEP_INTERVAL_MINUTES": "60",
     "MAX_REGENERATIONS": "3",
+    "DRAFT_ATTEMPTS": "3",
 }
 
 # Telegram's secret_token allows 1-256 of these characters; we also require some length.
@@ -74,6 +75,7 @@ class Settings:
     qa_model: str = "gemini-3.5-flash"
     sweep_interval_minutes: int = 60
     max_regenerations: int = 3
+    draft_attempts: int = 3
     database_url: str | None = None
     cron_secret: str | None = None
     serverless: bool = False
@@ -106,6 +108,7 @@ class Settings:
             f"transcript_max_unclear_ratio={self.transcript_max_unclear_ratio}, "
             f"sweep_interval_minutes={self.sweep_interval_minutes}, "
             f"max_regenerations={self.max_regenerations}, "
+            f"draft_attempts={self.draft_attempts}, "
             f"database={'postgres' if self.database_url else 'sqlite'}, "
             f"cron_secret={_mask(self.cron_secret or '')}, "
             f"serverless={self.serverless})"
@@ -198,6 +201,9 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     sweep_minutes = _parse_int("SWEEP_INTERVAL_MINUTES", get("SWEEP_INTERVAL_MINUTES"), errors)
     if sweep_minutes < 5:
         errors.append("SWEEP_INTERVAL_MINUTES must be at least 5")
+    draft_attempts = _parse_int("DRAFT_ATTEMPTS", get("DRAFT_ATTEMPTS"), errors)
+    if not 1 <= draft_attempts <= 5:
+        errors.append("DRAFT_ATTEMPTS must be between 1 and 5")
     max_regenerations = _parse_int("MAX_REGENERATIONS", get("MAX_REGENERATIONS"), errors)
     if max_regenerations < 0:
         errors.append("MAX_REGENERATIONS must be 0 or more")
@@ -242,6 +248,7 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         qa_model=get("QA_MODEL"),
         sweep_interval_minutes=sweep_minutes,
         max_regenerations=max_regenerations,
+        draft_attempts=draft_attempts,
         database_url=database_url,
         cron_secret=cron_secret,
         serverless=serverless,

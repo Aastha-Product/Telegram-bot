@@ -162,6 +162,14 @@ def test_prompt_without_news_forbids_mentioning_news() -> None:
 # --- make_draft (Gemini mocked: drafting and the QA fact check) ------------------------------
 
 
+@pytest.fixture(autouse=True)
+def two_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Most tests pin DRAFT_ATTEMPTS to 2 to keep fixtures short; test_configured_attempts covers the real count."""
+    import dataclasses
+
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, draft_attempts=2))
+
+
 CLEAN_QA = {"findings": [], "changes_meera_idea": False, "idea_note": "same point", "voice_issues": []}
 
 
@@ -379,3 +387,26 @@ def test_spoken_decimals_in_the_note_allow_the_digits() -> None:
 def test_spoken_decimal_does_not_break_other_number_words() -> None:
     assert draft.known_numbers("batch fourteen, zero point four") >= {"14", "0.4"}
     assert "0.4" not in draft.known_numbers("the main point for us")  # "point" alone is not a number
+
+
+def test_configured_attempts_are_used_before_dropping(model: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    import dataclasses
+
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, draft_attempts=3))
+    bad = _reply(GOOD_BODY + " #skincare")
+    model["replies"] += [bad, bad, _reply()]
+    assert _make().body == GOOD_BODY  # third attempt succeeds
+    assert len(model["prompts"]) == 3
+    model["replies"] += [bad, bad, bad]
+    assert _make() is None and len(model["prompts"]) == 6  # never more than the configured attempts
+
+
+def test_default_is_three_attempts() -> None:
+    assert config.load_settings({"TELEGRAM_BOT_TOKEN": "1:x", "TELEGRAM_CHAT_ID": "-1001",
+                                 "TELEGRAM_REVIEW_CHAT_ID": "5", "MEERA_USER_ID": "5",
+                                 "GEMINI_API_KEY": "k"}).draft_attempts == 3
+
+
+def test_prompt_forbids_inventing_product_types() -> None:
+    prompt = draft.build_prompt(NOTE, None, "", draft.pick_exemplars(None), [])
+    assert "do not name a product type" in prompt
