@@ -448,6 +448,7 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     message = update.message
     if message is None or not is_meera(message.from_user):
         return
+    log.info("review.start_command")
     await reply_safely(message, "I'm set up and listening. Send a voice note to the capture channel and I'll "
                                 "score it, draft it if it qualifies, and send it here for you to approve, edit, "
                                 "reject or regenerate. Nothing is ever posted for you.")

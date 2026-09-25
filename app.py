@@ -190,6 +190,8 @@ def describe_update(update: Update) -> str:
     kind = "channel_post" if update.channel_post is not None else "message"
     media = next((m for m in ("voice", "audio", "video_note", "document", "text", "photo", "sticker", "video")
                   if getattr(message, m, None)), "other")
+    if media == "text" and message.text.startswith("/"):
+        media = f"command:{message.text.split()[0][:20]}"
     sender = message.from_user.id if message.from_user else None
     return f"kind={kind} chat={message.chat.id} chat_type={message.chat.type} from={sender} media={media}"
 
@@ -209,8 +211,10 @@ async def on_private_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Typed text in the bot chat: an edit reply if she pressed Edit on a draft, otherwise a new note."""
     if await asyncio.to_thread(db.get_awaiting_edit) is not None:
+        log.info("app.private_text route=edit_reply update_id=%s", update.update_id)
         await review.handle_review_message(update, context)
         return
+    log.info("app.private_text route=new_note update_id=%s", update.update_id)
     note_id = await ingest.handle_private_text(update, context)
     if note_id is not None:
         await _process_now_or_later(update, context, note_id)

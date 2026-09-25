@@ -165,6 +165,7 @@ async def handle_run_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     message = update.message
     if message is None or not review.is_meera(message.from_user):
         return
+    log.info("pipeline.run_command")
     await review.reply_safely(message, "Processing anything pending now...")
     outcome = await run_sweep(context.bot, sweep_slot(datetime.now(UTC), prefix="manual"))
     await review.reply_safely(message, SWEEP_REPLIES[outcome])

@@ -525,8 +525,16 @@ def test_bot_chat_text_is_an_edit_reply_only_when_a_draft_awaits_edit(monkeypatc
     monkeypatch.setattr(review, "handle_review_message", fake_edit)
     monkeypatch.setattr(ingest, "handle_private_text", fake_note)
     context = SimpleNamespace(bot=FakeBot())
-    asyncio.run(app.on_private_text(SimpleNamespace(), context))
+    asyncio.run(app.on_private_text(SimpleNamespace(update_id=1), context))
     note_id = db.add_note(1, -1001, "a note", WHEN)
     db.start_edit(db.add_draft(note_id, "draft body", "m"))
-    asyncio.run(app.on_private_text(SimpleNamespace(), context))
+    asyncio.run(app.on_private_text(SimpleNamespace(update_id=1), context))
     assert routed == ["note", "edit"]
+
+
+def test_commands_are_labelled_in_update_log() -> None:
+    from telegram import User
+
+    msg = Message(message_id=1, date=WHEN, chat=Chat(id=5, type=Chat.PRIVATE), text="/start now",
+                  from_user=User(id=77, first_name="x", is_bot=False))
+    assert app.describe_update(Update(update_id=1, message=msg)).endswith("media=command:/start")
