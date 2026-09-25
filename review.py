@@ -40,6 +40,18 @@ EVIDENCE_PREVIEW_CHARS = 90
 GAP_PREVIEW_CHARS = 110
 
 NOT_AUTHORISED = "Only Meera can review drafts."
+ALREADY_REGENERATING = "Already writing a new version of this draft. It will arrive shortly."
+
+# Notes with a Regenerate in flight: repeat presses are ignored instead of drafting twice.
+_regenerating: set[int] = set()
+
+
+async def answer(query, text: str | None = None, show_alert: bool = False) -> None:
+    """Acknowledge a button press. Telegram rejects late answers ("query is too old"); that must never raise."""
+    try:
+        await query.answer(text, show_alert=show_alert)
+    except TelegramError as exc:
+        log.info("review.answer_skipped error=%s", type(exc).__name__)
 ALREADY_HANDLED = "This draft was already handled."
 
 DECISION_LABELS = {
@@ -271,11 +283,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     if not is_meera(query.from_user):
         log.warning("review.unauthorised_press user_id=%s", query.from_user.id if query.from_user else None)
-        await query.answer(NOT_AUTHORISED, show_alert=True)
+        await answer(query, NOT_AUTHORISED, show_alert=True)
         return
     match = CALLBACK_RE.match(query.data or "")
     if match is None:
-        await query.answer("Unknown action.")
+        await answer(query, "Unknown action.")
         return
     action, draft_id = match.group(1), int(match.group(2))
     # Very old messages arrive as InaccessibleMessage, which can't be replied to or edited.
@@ -295,10 +307,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def _approve(query, message: Message | None, draft_id: int) -> None:
     if not await asyncio.to_thread(db.approve_draft, draft_id):
-        await query.answer(ALREADY_HANDLED)
+        await answer(query, ALREADY_HANDLED)
         return
     final = await asyncio.to_thread(db.get_final_post, draft_id)
-    await query.answer("Approved")
+    await answer(query, "Approved")
     await _remove_buttons(message)
     text, parse_mode = format_approved(final.final_body)
     await reply_safely(message, text, parse_mode, reply_markup=posted_keyboard(draft_id))
@@ -308,11 +320,11 @@ async def _approve(query, message: Message | None, draft_id: int) -> None:
 
 async def _reject(query, message: Message | None, draft_id: int) -> None:
     if not await asyncio.to_thread(db.set_draft_status, draft_id, "discarded"):
-        await query.answer(ALREADY_HANDLED)
+        await answer(query, ALREADY_HANDLED)
         return
     d = await asyncio.to_thread(db.get_draft, draft_id)
     await asyncio.to_thread(db.set_note_status, d.note_id, "shelved")
-    await query.answer("Rejected")
+    await answer(query, "Rejected")
     await _remove_buttons(message)
     await reply_safely(message, "Rejected. Nothing was posted, and the note is shelved.")
     log.info("review.rejected draft_id=%s note_id=%s", d.id, d.note_id)
@@ -320,18 +332,18 @@ async def _reject(query, message: Message | None, draft_id: int) -> None:
 
 async def _mark_posted(query, message: Message | None, draft_id: int) -> None:
     if not await asyncio.to_thread(db.mark_posted, draft_id):
-        await query.answer("Already marked, or not an approved draft.")
+        await answer(query, "Already marked, or not an approved draft.")
         return
-    await query.answer("Marked as posted")
+    await answer(query, "Marked as posted")
     await _remove_buttons(message)
     log.info("review.marked_posted draft_id=%s", draft_id)
 
 
 async def _start_edit(query, message: Message | None, draft_id: int) -> None:
     if not await asyncio.to_thread(db.start_edit, draft_id):
-        await query.answer(ALREADY_HANDLED)
+        await answer(query, ALREADY_HANDLED)
         return
-    await query.answer("Send your edit")
+    await answer(query, "Send your edit")
     await reply_safely(message, (
         f"Editing draft #{draft_id}. Reply here with either:\n"
         f"- your full rewrite (at least {config.settings.draft_min_chars} characters), which I'll keep as-is, or\n"
@@ -344,12 +356,24 @@ async def _regenerate(bot: Bot, query, message: Message | None, draft_id: int) -
     """A fresh draft from the same note and assessment, through the same news, validators and QA."""
     d = await asyncio.to_thread(db.get_draft, draft_id)
     if d is None or d.status != "pending_review":
-        await query.answer(ALREADY_HANDLED)
+        await answer(query, ALREADY_HANDLED)
+        return
+    if d.note_id in _regenerating:
+        await answer(query, ALREADY_REGENERATING)
         return
     if await asyncio.to_thread(db.count_revisions, d.note_id) > config.settings.max_regenerations:
-        await query.answer("Regeneration limit reached. Edit it or write your own version.", show_alert=True)
+        await answer(query, "Regeneration limit reached. Edit it or write your own version.", show_alert=True)
         return
-    await query.answer("Regenerating")
+    await answer(query, "Regenerating")
+    _regenerating.add(d.note_id)
+    try:
+        await _regenerate_draft(bot, message, d)
+    finally:
+        _regenerating.discard(d.note_id)
+
+
+async def _regenerate_draft(bot: Bot, message: Message | None, d: db.Draft) -> None:
+    draft_id = d.id
     note = await asyncio.to_thread(db.get_note, d.note_id)
     assessment = await asyncio.to_thread(db.get_latest_assessment, d.note_id)
     core_idea = assessment.summary.get("core_idea", "") if assessment else ""

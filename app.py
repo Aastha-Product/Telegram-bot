@@ -126,7 +126,9 @@ async def on_startup(application: Application) -> None:
 
 def build_application(serverless: bool = False) -> Application:
     """The bot with all handlers. Serverless builds skip the scheduler and startup hook (Vercel Cron retries)."""
-    builder = Application.builder().token(config.settings.telegram_bot_token)
+    # Concurrent updates: a 40-60 s draft must not hold up button presses, which Telegram only accepts
+    # an answer to for a few seconds. Safe because every state change is guarded in the database.
+    builder = Application.builder().token(config.settings.telegram_bot_token).concurrent_updates(True)
     builder = builder.job_queue(None) if serverless else builder.post_init(on_startup)
     application = builder.build()
     settings = config.settings

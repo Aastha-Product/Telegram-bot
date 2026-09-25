@@ -583,3 +583,45 @@ def test_scorecard_includes_suggestions_as_third_message() -> None:
                   "news_source": "", "news_url": ""}
     assert asyncio.run(review.send_scorecard(bot, note, _result("rejected", 6.0), None, [suggestion])) is True
     assert len(bot.sent) == 3 and bot.sent[2]["text"].startswith("This note isn't strong enough")
+
+
+# --- button robustness under slow regenerations ----------------------------------------------------
+
+
+def test_expired_button_answer_never_raises() -> None:
+    from telegram.error import BadRequest
+
+    class ExpiredQuery(FakeQuery):
+        async def answer(self, text=None, show_alert=False):
+            raise BadRequest("Query is too old and response timeout expired or query id is invalid")
+
+    d = _pending_draft()
+    query = ExpiredQuery(f"approve:{d.id}")
+    asyncio.run(review.handle_callback(SimpleNamespace(callback_query=query), SimpleNamespace(bot=FakeBot())))
+    assert db.get_draft(d.id).status == "approved"  # the action still happened
+    assert query.message.replies  # and the copy-ready text was still sent
+
+
+def test_repeat_regenerate_press_is_ignored_while_one_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    d = _pending_draft()
+    review._regenerating.add(d.note_id)
+    try:
+        query = _press(f"regen:{d.id}")
+    finally:
+        review._regenerating.discard(d.note_id)
+    assert query.answers == [(review.ALREADY_REGENERATING, False)]
+    assert db.get_draft(d.id).status == "pending_review"
+
+
+def test_regenerate_guard_is_released_after_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def failing(*args):
+        raise gemini_client.GeminiError("down")
+
+    monkeypatch.setattr(draft, "draft_note", failing)
+    d = _pending_draft()
+    _press(f"regen:{d.id}")
+    assert d.note_id not in review._regenerating
+
+
+def test_app_processes_updates_concurrently() -> None:
+    assert app.build_application().concurrent_updates > 1
