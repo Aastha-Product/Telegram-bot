@@ -35,7 +35,8 @@ log = logging.getLogger(__name__)
 WEBHOOK_SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 MAX_WEBHOOK_BODY_BYTES = 1_000_000
 
-REQUIRED_PROMPTS: tuple[str, ...] = ("triage", "draft", "revise", "repair", "transcribe", "voice_skill", "qa")
+REQUIRED_PROMPTS: tuple[str, ...] = ("triage", "draft", "revise", "repair", "transcribe", "voice_skill", "qa",
+                                     "suggest")
 
 ALLOWED_UPDATES: list[str] = [Update.CHANNEL_POST, Update.MESSAGE, Update.CALLBACK_QUERY]
 FIRST_SWEEP_SECONDS = 60

@@ -125,6 +125,12 @@ MIGRATIONS: tuple[str, ...] = (
     PRAGMA user_version = 4;
     COMMIT;
     """,
+    """
+    BEGIN;
+    ALTER TABLE assessments ADD COLUMN suggestions_json TEXT;
+    PRAGMA user_version = 5;
+    COMMIT;
+    """,
 )
 
 DECISIONS: tuple[str, ...] = ("qualified", "rejected", "human_review")
@@ -186,6 +192,7 @@ class Assessment:
     overall: float
     decision: str
     scorecard_message_id: int | None
+    suggestions: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -451,7 +458,16 @@ def get_latest_assessment(note_id: int) -> Assessment | None:
         overall=row["overall"],
         decision=row["decision"],
         scorecard_message_id=row["scorecard_message_id"],
+        suggestions=None if row["suggestions_json"] is None else json.loads(row["suggestions_json"]),
     )
+
+
+def set_suggestions(assessment_id: int, suggestions: list[dict[str, Any]]) -> bool:
+    """Store the topic suggestions sent with a rejected note (audit trail; never regenerated)."""
+    with _connect() as conn:
+        cur = conn.execute("UPDATE assessments SET suggestions_json = ? WHERE id = ?",
+                           (json.dumps(suggestions), assessment_id))
+    return cur.rowcount == 1
 
 
 def set_scorecard_message(assessment_id: int, message_id: int) -> bool:

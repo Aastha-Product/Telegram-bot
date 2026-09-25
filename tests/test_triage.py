@@ -270,3 +270,59 @@ def test_schema_requires_ten_keyed_parameters_and_flags() -> None:
 def test_corpus_loads_all_published_pieces() -> None:
     pieces = draft.load_corpus()
     assert len(pieces) == 15 and sum(p.format == "linkedin" for p in pieces) == 4
+
+
+# --- topic suggestions ---------------------------------------------------------------------------
+
+
+HEADLINE = __import__("news").NewsItem("CDSCO tightens cosmetic labelling rules", "The Hindu",
+                                       "https://news.google.com/real", T0)
+
+
+def _suggestion(**kw) -> dict:
+    return {"topic": "Why pH belongs on the label", "why_it_fits": "formulator", "question": "Which pH surprised you?",
+            "category": "Formulation Science", "news_url": "", **kw}
+
+
+def test_suggestions_keep_only_complete_items_and_real_news() -> None:
+    data = {"suggestions": [
+        _suggestion(news_url="https://news.google.com/real"),
+        _suggestion(topic="Invented news hook", news_url="https://made-up.example/story"),
+        _suggestion(topic="", question="no topic"),
+        _suggestion(topic="Bad category", category="Hot Takes"),
+        _suggestion(topic="Fourth one"),
+    ]}
+    parsed = triage.parse_suggestions(data, [HEADLINE])
+    assert len(parsed) == triage.SUGGESTION_COUNT == 3
+    assert parsed[0]["news_headline"] == "CDSCO tightens cosmetic labelling rules"
+    assert parsed[0]["news_source"] == "The Hindu"
+    assert parsed[1]["topic"] == "Invented news hook" and parsed[1]["news_url"] == ""  # fake link dropped
+    assert parsed[2]["topic"] == "Bad category" and parsed[2]["category"] == ""
+
+
+def test_suggest_topics_prompt_and_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = {}
+
+    async def headlines():
+        return [HEADLINE]
+
+    async def fake_generate_json(prompt, schema, model_name, attachments=None):
+        seen["prompt"] = prompt
+        return {"suggestions": [_suggestion()]}
+
+    monkeypatch.setattr(triage, "current_headlines", headlines)
+    monkeypatch.setattr(gemini_client, "generate_json", fake_generate_json)
+    result = triage.parse_assessment(_note(), reply({"originality": 2}), "m")
+    suggestions = asyncio.run(triage.suggest_topics(result))
+    assert suggestions[0]["topic"] == "Why pH belongs on the label"
+    prompt = seen["prompt"]
+    assert "Originality: gap originality" in prompt  # told why the note fell short
+    assert "Clean beauty gets some things right" in prompt  # told what not to repeat
+    assert "https://news.google.com/real" in prompt
+    assert "{" + "count}" not in prompt
+
+    async def down(*args, **kwargs):
+        raise gemini_client.GeminiError("down")
+
+    monkeypatch.setattr(gemini_client, "generate_json", down)
+    assert asyncio.run(triage.suggest_topics(result)) == []  # enrichment only: never raises

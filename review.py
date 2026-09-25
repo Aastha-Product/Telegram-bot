@@ -121,13 +121,30 @@ def format_scorecard_message(result: triage.TriageResult) -> str:
     return _fit("\n".join(lines))
 
 
-async def send_scorecard(bot: Bot, note: db.Note, result: triage.TriageResult, assessment_id: int | None) -> bool:
-    """Two messages: transcript + summary, then the scorecard + decision. Never raises."""
+def format_suggestions_message(suggestions: list[dict[str, str]]) -> str:
+    lines = ["This note isn't strong enough to post yet. Topics that would suit you better:"]
+    for n, s in enumerate(suggestions, start=1):
+        lines += ["", f"{n}. {s['topic']}" + (f" ({s['category']})" if s.get("category") else "")]
+        if s.get("why_it_fits"):
+            lines.append(f"   Why it fits you: {s['why_it_fits']}")
+        lines.append(f"   Ask yourself: {s['question']}")
+        if s.get("news_url"):
+            lines.append(f"   In the news: {s['news_headline']} ({s['news_source']}) {s['news_url']}")
+    lines += ["", "Send a voice note answering any of these and I'll score it again."]
+    return _fit("\n".join(lines))
+
+
+async def send_scorecard(bot: Bot, note: db.Note, result: triage.TriageResult, assessment_id: int | None,
+                         suggestions: list[dict[str, str]] | None = None) -> bool:
+    """Transcript + summary, then the scorecard + decision, then topic suggestions if any. Never raises."""
     chat_id = config.settings.telegram_review_chat_id
     try:
         await with_retry(lambda: bot.send_message(chat_id=chat_id, text=format_transcript_message(note, result)))
         card: Message = await with_retry(lambda: bot.send_message(chat_id=chat_id,
                                                                   text=format_scorecard_message(result)))
+        if suggestions:
+            await with_retry(lambda: bot.send_message(chat_id=chat_id,
+                                                      text=format_suggestions_message(suggestions)))
     except TelegramError as exc:
         log.error("review.scorecard_failed note_id=%s error=%s", note.id, type(exc).__name__)
         return False

@@ -86,9 +86,15 @@ def fresh_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def ai(monkeypatch: pytest.MonkeyPatch) -> dict:
     """Fake triage model (via gemini_client) and fake drafting step (draft.draft_note)."""
-    state: dict = {"triage": [], "triage_calls": 0, "draft": [], "draft_calls": []}
+    state: dict = {"triage": [], "triage_calls": 0, "draft": [], "draft_calls": [], "suggest_calls": 0,
+                   "suggestions": {"suggestions": [{"topic": "What a CoA does and doesn't tell you", "why_it_fits": "her formulation background",
+                             "question": "When did a CoA last surprise you?", "category": "Industry Transparency",
+                             "news_url": ""}]}}
 
     async def fake_generate_json(prompt, schema, model_name, attachments=None):
+        if "suggestions" in schema["properties"]:
+            state["suggest_calls"] += 1
+            return state["suggestions"]
         state["triage_calls"] += 1
         item = state["triage"].pop(0)
         if isinstance(item, Exception):
@@ -103,8 +109,12 @@ def ai(monkeypatch: pytest.MonkeyPatch) -> dict:
             raise item
         return item
 
+    async def no_headlines() -> list:
+        return []
+
     monkeypatch.setattr(gemini_client, "generate_json", fake_generate_json)
     monkeypatch.setattr(draft, "draft_note", fake_draft_note)
+    monkeypatch.setattr(triage, "current_headlines", no_headlines)
     return state
 
 
@@ -366,3 +376,47 @@ def test_run_command_is_meera_only(ai: dict) -> None:
 def test_threshold_is_strictly_greater_than_8_by_default() -> None:
     assert config.settings.triage_threshold == 8.0
     assert dataclasses.replace(config.settings).triage_threshold == 8.0
+
+
+# --- topic suggestions for notes that don't qualify ----------------------------------------------
+
+
+def test_rejected_note_gets_topic_suggestions_once(ai: dict) -> None:
+    note_id = _add(SAMPLES["clean_beauty"])
+    ai["triage"].append(triage_reply(6.0))
+    bot = FakeBot()
+    assert _process(bot, note_id) == "rejected"
+    suggestions_msg = bot.texts()[-1]
+    assert suggestions_msg.startswith("This note isn't strong enough to post yet.")
+    assert "What a CoA does and doesn't tell you" in suggestions_msg
+    assert "Ask yourself: When did a CoA last surprise you?" in suggestions_msg
+    stored = db.get_latest_assessment(note_id).suggestions
+    assert stored[0]["topic"] == "What a CoA does and doesn't tell you"
+
+
+def test_suggestions_are_reused_when_the_scorecard_is_resent(ai: dict) -> None:
+    note_id = _add(SAMPLES["clean_beauty"])
+    ai["triage"].append(triage_reply(6.0))
+    assert _process(FakeBot(fail_sends=20), note_id) == "error"
+    assert _process(FakeBot(), note_id) == "rejected"
+    assert ai["suggest_calls"] == 1 and ai["triage_calls"] == 1
+
+
+def test_no_suggestions_for_qualified_or_human_review_notes(ai: dict) -> None:
+    good, flagged = _add(NOTE, 1), _add(NOTE, 2)
+    ai["triage"] += [triage_reply(9.0), triage_reply(9.0, [{"type": "defamatory", "detail": "d", "quote": "q"}])]
+    _process(FakeBot(), good)
+    _process(FakeBot(), flagged)
+    assert ai["suggest_calls"] == 0
+
+
+def test_rejected_scorecard_still_sent_when_suggestions_fail(ai: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def failing(result):
+        return []
+
+    monkeypatch.setattr(triage, "suggest_topics", failing)
+    note_id = _add(SAMPLES["clean_beauty"])
+    ai["triage"].append(triage_reply(6.0))
+    bot = FakeBot()
+    assert _process(bot, note_id) == "rejected"
+    assert len(bot.sent) == 2 and bot.scorecards()

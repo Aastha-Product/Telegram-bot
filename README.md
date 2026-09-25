@@ -13,6 +13,7 @@ See `PLAN.md` for the design, `docs/publishability_rubric.md` for the scoring ru
 | Gemini (triage) | Scores 10 parameters, each with verbatim evidence, a gap and a guardrail status; flags hard guardrail issues | `triage.py` |
 | Code | Verifies evidence against the transcript, applies guardrail caps, computes the weighted score, detects personal data, decides: **> 8.0 and no flags = draft** | `triage.py` |
 | Telegram | Scorecard to Meera for every note: rejected (with what would make it stronger), human review (with the flags), or qualified | `review.py` |
+| Gemini + Google News | For a note scoring 8 or below: 3 topics that suit Meera specifically, from her content areas and current credible headlines, each phrased as a question about her own experience | `triage.py` |
 | Google News | A recent, relevant hook from an allowlisted credible publisher, or none | `news.py` |
 | Gemini (AI) | Drafts in her voice (`prompts/voice_skill.md` + corpus examples), preserving her core idea | `draft.py` |
 | QA | Code validators (invented numbers, studies or timing; emoji, hashtags, links, CTAs), then a model fact check for anything the note doesn't support. One redraft, then drop | `draft.py` |

@@ -18,6 +18,7 @@ import config
 import db
 import draft
 import gemini_client
+import news
 
 log = logging.getLogger(__name__)
 
@@ -354,3 +355,89 @@ async def assess_note(note: db.Note) -> TriageResult | None:
              note.id, result.overall, result.decision, len(result.hard_flags),
              sum(1 for p in result.parameters if p.caps))
     return result
+
+
+# --- topic suggestions for notes that don't qualify ------------------------------------------
+
+SUGGESTION_COUNT = 3
+# Searches across Meera's content areas, used to ground suggestions in current industry news.
+SUGGESTION_NEWS_QUERIES: tuple[str, ...] = (
+    "skincare formulation India",
+    "cosmetic regulation India",
+    "skincare ingredient safety",
+    "sunscreen India",
+)
+
+
+def suggestion_schema() -> dict[str, Any]:
+    text = {"type": "string"}
+    return {
+        "type": "object",
+        "properties": {
+            "suggestions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"topic": text, "why_it_fits": text, "question": text,
+                                   "category": {"type": "string", "enum": draft.corpus_categories()},
+                                   "news_url": text},
+                    "required": ["topic", "why_it_fits", "question", "category", "news_url"],
+                },
+            },
+        },
+        "required": ["suggestions"],
+    }
+
+
+async def current_headlines() -> list[news.NewsItem]:
+    """A handful of recent, credible headlines across her content areas; [] if news is unavailable."""
+    seen: dict[str, news.NewsItem] = {}
+    for query in SUGGESTION_NEWS_QUERIES:
+        for item in await news.fetch_news(query):
+            seen.setdefault(item.url, item)
+    return list(seen.values())
+
+
+def parse_suggestions(data: dict[str, Any], headlines: list[news.NewsItem]) -> list[dict[str, str]]:
+    """Validate in code: complete items only, at most three, and news only if it was actually fetched."""
+    by_url = {h.url: h for h in headlines}
+    categories = draft.corpus_categories()
+    parsed = []
+    for item in data.get("suggestions") or []:
+        if not isinstance(item, dict):
+            continue
+        topic, question = str(item.get("topic", "")).strip(), str(item.get("question", "")).strip()
+        if not topic or not question:
+            continue
+        headline = by_url.get(str(item.get("news_url", "")).strip())
+        parsed.append({
+            "topic": topic,
+            "why_it_fits": str(item.get("why_it_fits", "")).strip(),
+            "question": question,
+            "category": item.get("category") if item.get("category") in categories else "",
+            "news_headline": headline.title if headline else "",
+            "news_source": headline.source if headline else "",
+            "news_url": headline.url if headline else "",
+        })
+    return parsed[:SUGGESTION_COUNT]
+
+
+async def suggest_topics(result: TriageResult) -> list[dict[str, str]]:
+    """Topics that would suit Meera better. Enrichment only: returns [] on any failure, never raises."""
+    try:
+        headlines = await current_headlines()
+        weaknesses = "; ".join(result.improvements) or "not enough original, first-hand material"
+        prompt = gemini_client.render(
+            gemini_client.load_prompt("suggest"),
+            core_idea=result.summary.get("core_idea", "") or "unclear",
+            weaknesses=weaknesses,
+            categories=", ".join(draft.corpus_categories()),
+            published="\n".join(f"- {p.title}" for p in draft.load_corpus()),
+            news="\n".join(f"- {h.title} | {h.source} | {h.url}" for h in headlines) or "None available.",
+            count=str(SUGGESTION_COUNT),
+        )
+        data = await gemini_client.generate_json(prompt, suggestion_schema(), config.settings.triage_model)
+        return parse_suggestions(data, headlines)
+    except Exception as exc:
+        log.warning("triage.suggestions_unavailable note_id=%s error=%s", result.note_id, type(exc).__name__)
+        return []

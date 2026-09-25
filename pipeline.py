@@ -73,7 +73,8 @@ async def _process(bot: Bot, note_id: int) -> str:
         return "error"  # unusable model output; left as 'new' for the sweep
     assessment = await asyncio.to_thread(db.get_latest_assessment, note.id)
     if assessment.scorecard_message_id is None:
-        if not await review.send_scorecard(bot, note, result, assessment.id):
+        suggestions = await _suggestions_for(result, assessment)
+        if not await review.send_scorecard(bot, note, result, assessment.id, suggestions):
             return "error"  # keep the note retryable until Meera has actually seen the verdict
 
     if not result.qualified:
@@ -95,6 +96,18 @@ async def _process(bot: Bot, note_id: int) -> str:
     log.info("pipeline.drafted note_id=%s draft_id=%s news=%s delivered=%s",
              note.id, draft_id, "yes" if drafted.news else "no", delivered)
     return "drafted"
+
+
+async def _suggestions_for(result: triage.TriageResult, assessment: db.Assessment) -> list[dict[str, str]]:
+    """Better topics for a rejected note; generated once and stored, so a resend reuses them."""
+    if result.decision != triage.REJECTED:
+        return []
+    if assessment.suggestions is not None:
+        return assessment.suggestions
+    suggestions = await triage.suggest_topics(result)
+    if suggestions:
+        await asyncio.to_thread(db.set_suggestions, assessment.id, suggestions)
+    return suggestions
 
 
 async def run_sweep(bot: Bot, slot: str) -> str:

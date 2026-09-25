@@ -559,3 +559,27 @@ def test_send_scorecard_records_message_and_survives_telegram_failure() -> None:
     assert len(bot.sent) == 2 and db.get_latest_assessment(note.id).scorecard_message_id == 1002
     failing = FakeBot([BadRequest("x")])
     assert asyncio.run(review.send_scorecard(failing, note, _result("rejected", 7.0), None)) is False
+
+
+def test_suggestions_message_format() -> None:
+    text = review.format_suggestions_message([
+        {"topic": "Why pH belongs on the label", "why_it_fits": "formulator", "question": "Which pH surprised you?",
+         "category": "Formulation Science", "news_headline": "CDSCO tightens rules", "news_source": "The Hindu",
+         "news_url": "https://news.google.com/real"},
+        {"topic": "Reading a CoA", "why_it_fits": "", "question": "What do you check first?", "category": "",
+         "news_headline": "", "news_source": "", "news_url": ""},
+    ])
+    assert "1. Why pH belongs on the label (Formulation Science)" in text
+    assert "Ask yourself: Which pH surprised you?" in text
+    assert "In the news: CDSCO tightens rules (The Hindu) https://news.google.com/real" in text
+    assert "2. Reading a CoA\n   Ask yourself: What do you check first?" in text
+    assert text.endswith("Send a voice note answering any of these and I'll score it again.")
+
+
+def test_scorecard_includes_suggestions_as_third_message() -> None:
+    note = db.get_note(db.add_note(1, -1001, "a note long enough to score properly here", T0))
+    bot = FakeBot()
+    suggestion = {"topic": "T", "why_it_fits": "", "question": "Q?", "category": "", "news_headline": "",
+                  "news_source": "", "news_url": ""}
+    assert asyncio.run(review.send_scorecard(bot, note, _result("rejected", 6.0), None, [suggestion])) is True
+    assert len(bot.sent) == 3 and bot.sent[2]["text"].startswith("This note isn't strong enough")

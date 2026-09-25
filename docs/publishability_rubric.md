@@ -67,7 +67,15 @@ Each parameter gets a score from 0 to 10, a reason, a **verbatim evidence quote 
    **Exactly 8.0 does not qualify.**
 7. **A low-confidence transcript** (the model rates the audio as unclear, or more than 20% of the words are marked `[unclear]`) goes to human review before triage. We never score or draft from words we can't trust.
 
-## 4. After a note qualifies
+## 4. When a note doesn't qualify (8.0 or below)
+The scorecard lists the weakest parameters and what would strengthen them. A third message suggests **3 topics that suit Meera specifically**:
+- They're drawn from her content areas and current credible headlines, and never repeat a published piece.
+- Each is phrased as a question about her own experience, so nothing is invented for her.
+- Any linked headline must be one that was actually fetched.
+
+Suggestions are generated once and stored with the assessment. If generating them fails, the scorecard is still sent.
+
+## 5. After a note qualifies
 - **News:** a hook only from recent (14 days), relevant (keyword overlap) and credible (allowlisted publisher) Google News items. The draft records the headline, source, date, URL and *why it's relevant*. If nothing fits, there's no hook.
 - **Draft QA, in two layers:**
   1. The existing code validators: invented numbers, research claims and timing; unverified sources; emoji, hashtags, links, calls to action, clichés and lists.
