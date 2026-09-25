@@ -1,4 +1,10 @@
-"""Entrypoint: builds the Telegram application (polling locally, webhook in prod)."""
+"""Entrypoint: the Telegram application in three hosting modes.
+
+- Local: `python app.py` long-polls (no public URL needed).
+- Always-on host (Railway/Render): `python app.py` with PUBLIC_URL set runs a webhook server.
+- Vercel: imports this module and serves the ASGI `app` below; each request does its work
+  before replying, because a serverless function may be frozen once the response is sent.
+"""
 
 from __future__ import annotations
 
@@ -7,11 +13,14 @@ import hmac
 import json
 import logging
 import signal
+import sys
+from datetime import UTC, datetime
+from typing import Any
 
 import tornado.httpserver
 import tornado.web
 
-from telegram import Update
+from telegram import Bot, Update
 from telegram.error import InvalidToken, TelegramError
 from telegram.ext import (
     Application,
@@ -72,7 +81,8 @@ def setup_logging() -> None:
     settings = config.settings
     # The webhook secret is part of the URL path, which tornado's access log would otherwise print.
     handler.addFilter(RedactSecrets([settings.telegram_bot_token, settings.gemini_api_key,
-                                     settings.webhook_secret or ""]))
+                                     settings.webhook_secret or "", settings.database_url or "",
+                                     settings.cron_secret or ""]))
     logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
     # httpx logs every request URL at INFO, and Telegram URLs contain the bot token.
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -114,13 +124,11 @@ async def on_startup(application: Application) -> None:
     await ingest.transcribe_pending(application.bot)
 
 
-def build_application() -> Application:
-    application = (
-        Application.builder()
-        .token(config.settings.telegram_bot_token)
-        .post_init(on_startup)
-        .build()
-    )
+def build_application(serverless: bool = False) -> Application:
+    """The bot with all handlers. Serverless builds skip the scheduler and startup hook (Vercel Cron retries)."""
+    builder = Application.builder().token(config.settings.telegram_bot_token)
+    builder = builder.job_queue(None) if serverless else builder.post_init(on_startup)
+    application = builder.build()
     settings = config.settings
     # Group -1 runs before everything else: record the shape of every update, never its content.
     application.add_handler(TypeHandler(Update, log_update), group=-1)
@@ -152,7 +160,8 @@ def build_application() -> Application:
         )
     )
     application.add_error_handler(on_error)
-    schedule_sweep(application)
+    if not serverless:
+        schedule_sweep(application)
     return application
 
 
@@ -160,6 +169,14 @@ async def on_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Capture the note, then process it immediately in the background (triage, scorecard, draft)."""
     note_id = await ingest.handle_channel_post(update, context)
     if note_id is not None:
+        await _process_now_or_later(update, context, note_id)
+
+
+async def _process_now_or_later(update: Update, context: ContextTypes.DEFAULT_TYPE, note_id: int) -> None:
+    """Always-on hosts process in the background; serverless must finish before replying to Telegram."""
+    if config.settings.serverless:
+        await pipeline.process_note(context.bot, note_id)
+    else:
         context.application.create_task(pipeline.process_note(context.bot, note_id), update=update)
 
 
@@ -186,7 +203,7 @@ async def on_private_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """Meera can also send voice notes straight to the bot chat; same flow as the channel."""
     note_id = await ingest.handle_private_voice(update, context)
     if note_id is not None:
-        context.application.create_task(pipeline.process_note(context.bot, note_id), update=update)
+        await _process_now_or_later(update, context, note_id)
 
 
 def schedule_sweep(application: Application) -> None:
@@ -252,9 +269,7 @@ async def run_webhook(application: Application) -> None:
             pass  # Windows has no loop signal handlers; Ctrl+C still raises KeyboardInterrupt there.
     async with application:
         await application.bot.set_webhook(
-            url=f"{settings.public_url}/telegram/{settings.webhook_secret}",
-            secret_token=settings.webhook_secret,
-            allowed_updates=ALLOWED_UPDATES,
+            url=webhook_url(), secret_token=settings.webhook_secret, allowed_updates=ALLOWED_UPDATES,
         )
         await application.start()
         server.listen(settings.port, address="0.0.0.0")
@@ -268,8 +283,125 @@ async def run_webhook(application: Application) -> None:
             await application.stop()
 
 
+def webhook_url() -> str:
+    return f"{config.settings.public_url}/telegram/{config.settings.webhook_secret}"
+
+
+# --- Vercel (serverless) entrypoint -------------------------------------------------------------
+
+_serverless_ready = False
+
+
+def _prepare_serverless() -> None:
+    """Once per cold start: logging, assets, and the database (migrations are idempotent)."""
+    global _serverless_ready
+    if not _serverless_ready:
+        setup_logging()
+        check_assets()
+        db.init_db()
+        _serverless_ready = True
+
+
+async def _process_serverless_update(body: bytes) -> None:
+    application = build_application(serverless=True)
+    async with application:  # initialize/shutdown per request: nothing may outlive it
+        await application.process_update(Update.de_json(json.loads(body), application.bot))
+
+
+async def serve_webhook(secret_header: str | None, body: bytes) -> tuple[int, str]:
+    status, update = parse_webhook(secret_header, body, None)  # authenticate before any Telegram call
+    if update is None:
+        log.warning("app.webhook_rejected status=%s", status)
+        return status, "rejected"
+    _prepare_serverless()
+    await _process_serverless_update(body)
+    # 200 even if a handler failed: failures are logged and retried by the cron, and a non-2xx
+    # would make Telegram redeliver the same update over and over.
+    return 200, "ok"
+
+
+async def serve_cron(authorization: str | None) -> tuple[int, str]:
+    expected = f"Bearer {config.settings.cron_secret}" if config.settings.cron_secret else ""
+    if not expected or not hmac.compare_digest((authorization or "").encode(), expected.encode()):
+        return 401, "unauthorised"
+    _prepare_serverless()
+    async with Bot(config.settings.telegram_bot_token) as bot:
+        outcome = await pipeline.run_sweep(bot, pipeline.sweep_slot(datetime.now(UTC)))
+    return 200, outcome
+
+
+async def route(method: str, path: str, headers: dict[str, str], body: bytes) -> tuple[int, str]:
+    if method == "GET" and path == "/healthz":
+        return 200, "ok"
+    if method == "POST" and config.settings.webhook_secret and path == f"/telegram/{config.settings.webhook_secret}":
+        return await serve_webhook(headers.get(WEBHOOK_SECRET_HEADER.lower()), body)
+    if method == "GET" and path == "/cron/sweep":
+        return await serve_cron(headers.get("authorization"))
+    return 404, "not found"
+
+
+async def _read_body(receive: Any) -> bytes | None:
+    body = b""
+    while True:
+        message = await receive()
+        body += message.get("body", b"")
+        if len(body) > MAX_WEBHOOK_BODY_BYTES:
+            return None
+        if not message.get("more_body"):
+            return body
+
+
+async def asgi_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+    """ASGI entrypoint for Vercel."""
+    if scope["type"] == "lifespan":
+        while True:
+            message = await receive()
+            if message["type"] == "lifespan.startup":
+                await send({"type": "lifespan.startup.complete"})
+            elif message["type"] == "lifespan.shutdown":
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+    if scope["type"] != "http":
+        return
+    headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+    body = await _read_body(receive)
+    if body is None:
+        status, text = 413, "too large"
+    else:
+        try:
+            status, text = await route(scope["method"], scope["path"], headers, body)
+        except Exception:
+            log.exception("app.request_failed path_kind=%s", "telegram" if scope["path"].startswith("/telegram/") else scope["path"])
+            status, text = 500, "error"
+    await send({"type": "http.response.start", "status": status,
+                "headers": [(b"content-type", b"text/plain; charset=utf-8")]})
+    await send({"type": "http.response.body", "body": text.encode()})
+
+
+# Vercel looks for a top-level variable named `app` in app.py.
+app = asgi_app
+
+
+# --- command line ----------------------------------------------------------------------------------
+
+
+async def register_webhook() -> None:
+    """One-time step after deploying to Vercel: point Telegram at the deployment's webhook URL."""
+    settings = config.settings
+    if not settings.public_url or not settings.webhook_secret:
+        raise SystemExit("Set PUBLIC_URL and WEBHOOK_SECRET in .env first.")
+    async with Bot(settings.telegram_bot_token) as bot:
+        await bot.set_webhook(url=webhook_url(), secret_token=settings.webhook_secret,
+                              allowed_updates=ALLOWED_UPDATES)
+        info = await bot.get_webhook_info()
+    print(f"Webhook set to {settings.public_url}/telegram/*** (pending updates: {info.pending_update_count})")
+
+
 def main() -> None:
     """Start the bot: webhook when PUBLIC_URL is set (production), long-polling otherwise (local)."""
+    if sys.argv[1:] == ["set-webhook"]:
+        asyncio.run(register_webhook())
+        return
     setup_logging()
     try:
         check_assets()

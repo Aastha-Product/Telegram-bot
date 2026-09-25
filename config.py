@@ -74,6 +74,9 @@ class Settings:
     qa_model: str = "gemini-3.5-flash"
     sweep_interval_minutes: int = 60
     max_regenerations: int = 3
+    database_url: str | None = None
+    cron_secret: str | None = None
+    serverless: bool = False
 
     @property
     def webhook_mode(self) -> bool:
@@ -102,7 +105,10 @@ class Settings:
             f"qa_model={self.qa_model!r}, "
             f"transcript_max_unclear_ratio={self.transcript_max_unclear_ratio}, "
             f"sweep_interval_minutes={self.sweep_interval_minutes}, "
-            f"max_regenerations={self.max_regenerations})"
+            f"max_regenerations={self.max_regenerations}, "
+            f"database={'postgres' if self.database_url else 'sqlite'}, "
+            f"cron_secret={_mask(self.cron_secret or '')}, "
+            f"serverless={self.serverless})"
         )
 
     __str__ = __repr__
@@ -195,6 +201,19 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     max_regenerations = _parse_int("MAX_REGENERATIONS", get("MAX_REGENERATIONS"), errors)
     if max_regenerations < 0:
         errors.append("MAX_REGENERATIONS must be 0 or more")
+    database_url = env.get("DATABASE_URL", "").strip() or None
+    if database_url is not None and not database_url.startswith(("postgres://", "postgresql://")):
+        errors.append("DATABASE_URL must be a postgres:// or postgresql:// connection string")
+    cron_secret = env.get("CRON_SECRET", "").strip() or None
+    # Vercel sets VERCEL=1 inside its functions.
+    serverless = env.get("VERCEL", "").strip() == "1"
+    if serverless:
+        if database_url is None:
+            errors.append("DATABASE_URL is required on Vercel: its file system is temporary, so SQLite would lose data")
+        if webhook_secret is None or not WEBHOOK_SECRET_RE.match(webhook_secret):
+            errors.append("WEBHOOK_SECRET is required on Vercel: 16-256 characters of A-Z, a-z, 0-9, _ or -")
+        if cron_secret is None or len(cron_secret) < 16:
+            errors.append("CRON_SECRET (at least 16 characters) is required on Vercel to protect the retry cron")
     port = _parse_int("PORT", get("PORT"), errors)
     if not 0 < port < 65536:
         errors.append("PORT must be between 1 and 65535")
@@ -223,6 +242,9 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         qa_model=get("QA_MODEL"),
         sweep_interval_minutes=sweep_minutes,
         max_regenerations=max_regenerations,
+        database_url=database_url,
+        cron_secret=cron_secret,
+        serverless=serverless,
     )
     if errors:
         raise ConfigError("Invalid configuration: " + "; ".join(errors))

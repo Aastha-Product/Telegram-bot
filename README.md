@@ -67,6 +67,41 @@ All external services are mocked. Live checks against real Gemini, Google News a
 
 When you change `prompts/draft.md` or `prompts/voice_skill.md`, re-run `eval_live.py draft` and compare against `tests/fixtures/last_good_drafts.json` before shipping.
 
+## Deploy on Vercel (serverless) with Supabase
+
+Vercel imports `app.py` and serves its ASGI `app`:
+- `POST /telegram/<WEBHOOK_SECRET>` accepts only requests carrying Telegram's matching secret header. It processes the note fully (transcribe, score, draft, review) before replying.
+- `GET /cron/sweep` is the retry job, protected by `CRON_SECRET`. `vercel.json` schedules it daily at 03:30 UTC (09:00 IST); Hobby allows one cron run per day.
+- `GET /healthz` returns `ok`.
+
+Data lives in **Supabase Postgres**, because Vercel's file system is temporary.
+
+1. **Supabase:** create a project, then go to **Connect** and choose **Transaction pooler** (port **6543**). Copy the URI and put your database password into it.
+2. **Vercel:** set these under Project, then Settings, then Environment Variables (Production):
+
+   | Variable | Value |
+   |---|---|
+   | `TELEGRAM_BOT_TOKEN` | from @BotFather (rotate it first if it was ever shared) |
+   | `TELEGRAM_CHAT_ID` | capture channel id (`-100...`) |
+   | `TELEGRAM_REVIEW_CHAT_ID` | Meera's chat id |
+   | `MEERA_USER_ID` | Meera's Telegram user id |
+   | `GEMINI_API_KEY` | from Google AI Studio (rotate it first if it was ever shared) |
+   | `DATABASE_URL` | the Supabase transaction-pooler URI from step 1 |
+   | `WEBHOOK_SECRET` | output of `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+   | `CRON_SECRET` | another output of that command |
+
+   The app refuses to start on Vercel if `DATABASE_URL`, `WEBHOOK_SECRET` or `CRON_SECRET` is missing.
+3. **Redeploy.** Push to GitHub, or use Deployments, then Redeploy. The tables are created automatically on first run.
+4. **Stop any local `python app.py`.** Local polling can't run while the webhook is set.
+5. **Point Telegram at Vercel (once).** Add `PUBLIC_URL=https://<your-project>.vercel.app` and the same `WEBHOOK_SECRET` to your local `.env`, then run:
+   ```bash
+   .venv/Scripts/python app.py set-webhook
+   ```
+6. **Check it:**
+   - `https://<your-project>.vercel.app/healthz` should return `ok`.
+   - Send a voice note to the bot.
+   - In Vercel's logs, `app.update_received` shows every incoming message, and `review.scorecard_sent` shows the reply.
+
 ## Deploy (Railway; Render is the same shape)
 
 In production the bot runs in **webhook mode**. It switches automatically when `PUBLIC_URL` is set, registers the webhook with Telegram on startup, and serves:

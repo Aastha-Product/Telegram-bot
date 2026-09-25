@@ -38,8 +38,10 @@ SWEEP_REPLIES = {
     "skipped": "A sweep for this minute already happened.",
 }
 
-# One note at a time: an arrival task and a sweep must never process the same note concurrently.
+# One note at a time within a process; claim_note covers separate processes (serverless copies).
 _note_lock = asyncio.Lock()
+# Longer than the 300 s serverless limit, so a live worker never loses its claim mid-run.
+CLAIM_SECONDS = 360
 _sweep_lock = asyncio.Lock()
 
 
@@ -67,7 +69,15 @@ async def _process(bot: Bot, note_id: int) -> str:
     note = await asyncio.to_thread(db.get_note, note_id)
     if note is None or note.status != "new":
         return "skipped"
+    if not await asyncio.to_thread(db.claim_note, note.id, CLAIM_SECONDS):
+        return "skipped"  # another worker is processing it right now
+    try:
+        return await _process_claimed(bot, note)
+    finally:
+        await asyncio.to_thread(db.release_note, note.id)
 
+
+async def _process_claimed(bot: Bot, note: db.Note) -> str:
     result = await triage.assess_note(note)  # reuses a stored assessment; GeminiError propagates
     if result is None:
         return "error"  # unusable model output; left as 'new' for the sweep

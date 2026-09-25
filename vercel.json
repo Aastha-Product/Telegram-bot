@@ -1,0 +1,12 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "app.py": {
+      "maxDuration": 300,
+      "excludeFiles": "{tests/**,docs/**,smoke_gemini.py}"
+    }
+  },
+  "crons": [
+    { "path": "/cron/sweep", "schedule": "30 3 * * *" }
+  ]
+}
